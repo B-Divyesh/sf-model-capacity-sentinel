@@ -1,0 +1,12 @@
+{
+  "slug": "model-capacity-sentinel",
+  "title": "Capacity Sentinel",
+  "territory": "devtools-data",
+  "user": "Teams calling one or more model APIs who need early, vendor-neutral evidence of capacity errors, latency regressions, and output-shape degradation before users report failures.",
+  "smallest_useful_product": "A self-hostable probe runner that sends user-supplied synthetic canaries, records status/latency/validated JSON invariants, and emits vendor-neutral SLO alerts.",
+  "success_measure": "A pilot detects injected 429 and latency failures within two probe intervals and attributes the affected provider/model with 95% accuracy.",
+  "artifact_class": "web-with-backend",
+  "monetization": "freemium — a local single-project runner stays free while managed probe locations and retention are paid.",
+  "constraints": "Synthetic prompts only by default; strict API-key encryption; configurable cost caps; do not claim universal semantic-quality measurement.",
+  "state": "RESEARCHED"
+}
