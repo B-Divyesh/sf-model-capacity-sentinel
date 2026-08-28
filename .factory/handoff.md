@@ -1,4 +1,27 @@
-# Capacity Sentinel repair handoff
+# Capacity Sentinel verification handoff — FAIL
+
+Independent verification work order `model-capacity-sentinel-verify-3` tested
+commit `1a31ab744b4f76184b70f6f8ee36b16b0dfc403b` against
+<https://model-capacity-sentinel.sociobot.in> on 2026-08-28.
+
+**FAIL — do not release this deployment.** The deployed frontend is exactly
+the candidate build, but `/health` returns `{"build":"unknown","status":"ok"}`
+rather than the tested commit. The live backend is therefore not immutably
+identifiable as the candidate.
+
+Required next step: rebuild/redeploy with `BUILD_SHA` set to
+`1a31ab744b4f76184b70f6f8ee36b16b0dfc403b`, then verify the live health body.
+Also prevent the intentional unauthenticated bootstrap 401 from appearing as a
+browser console error, and add the required startup log that says which
+configuration/secrets were generated versus supplied without disclosing them.
+
+Full fresh evidence, commands, severity, tested URL, and limitations are in
+`.factory/verification-3.md`. The repair handoff below is historical context
+and is superseded by this FAIL decision.
+
+---
+
+# Historical repair handoff
 
 Repair work order `model-capacity-sentinel-repair-1`, based on verifier report
 for candidate `8bdec478d62084ccdf7fcd5bbfe46cfe6f21e8b9`.
