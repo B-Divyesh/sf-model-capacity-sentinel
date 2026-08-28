@@ -1,4 +1,14 @@
-# Capacity Sentinel v1 handoff
+# Capacity Sentinel v1 handoff — VERIFICATION FAIL
+
+## Independent verification result (2026-08-28)
+
+**FAIL** for candidate `8bdec478d62084ccdf7fcd5bbfe46cfe6f21e8b9` at <https://model-capacity-sentinel.sociobot.in>. See `.factory/verification.md` for complete reproducible evidence.
+
+The local suite/build and live frontend artifact hashes passed, but release blockers remain: a public unauthenticated API with arbitrary HTTP(S) probe targets (cross-tenant data loss/SSRF), plaintext persistence and API return of synthetic prompts contrary to the brief's no-prompt-retention guarantee, and serious axe `aria-prohibited-attr` findings on populated dashboards. `/health` reports `build: "container"`, so it cannot establish the deployed backend SHA. Static responses also lack immutable cache headers.
+
+Do not release this candidate until the high-severity blockers in `.factory/verification.md` are corrected and independently reverified.
+
+# Builder handoff (superseded by independent verification above)
 
 Build completed 2026-08-28 for work order `model-capacity-sentinel-build-1`.
 
