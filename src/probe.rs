@@ -10,10 +10,50 @@ use uuid::Uuid;
 pub async fn execute(state: &AppState, probe: &ProbeRow) -> Observation {
     let started_at = Utc::now().to_rfc3339();
     let id = Uuid::new_v4().to_string();
+    let endpoint = match url::Url::parse(&probe.endpoint_url) {
+        Ok(url) => url,
+        Err(_) => {
+            let obs = configuration_error(&probe.id, id, started_at, "Stored endpoint is invalid");
+            save(state, &obs).await;
+            evaluate_alerts(state, probe).await;
+            return obs;
+        }
+    };
+    let addresses = match crate::routes::resolve_public_endpoint(&endpoint, state.allow_private_endpoints).await {
+        Ok(addresses) => addresses,
+        Err(_) => {
+            let obs = configuration_error(&probe.id, id, started_at, "Endpoint no longer resolves to a public internet address");
+            save(state, &obs).await;
+            evaluate_alerts(state, probe).await;
+            return obs;
+        }
+    };
+    let client = match reqwest::Client::builder()
+        .user_agent("Capacity-Sentinel/0.1")
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(endpoint.host_str().expect("validated endpoint has host"), &addresses)
+        .build() {
+            Ok(client) => client,
+            Err(_) => {
+                let obs = configuration_error(&probe.id, id, started_at, "Could not prepare a safe endpoint connection");
+                save(state, &obs).await;
+                evaluate_alerts(state, probe).await;
+                return obs;
+            }
+        };
+    let prompt = match state.secrets.decrypt(&probe.prompt_cipher) {
+        Ok(prompt) => prompt,
+        Err(_) => {
+            let obs = configuration_error(&probe.id, id, started_at, "Stored canary could not be decrypted");
+            save(state, &obs).await;
+            evaluate_alerts(state, probe).await;
+            return obs;
+        }
+    };
     let used_today: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)),0) FROM observations WHERE probe_id=? AND started_at >= date('now')"
     ).bind(&probe.id).fetch_one(&state.db).await.unwrap_or(0);
-    let estimated_input = ((probe.prompt.chars().count() as i64 + 3) / 4).max(1);
+    let estimated_input = ((prompt.chars().count() as i64 + 3) / 4).max(1);
     let estimated_request = estimated_input + probe.max_output_tokens;
     if used_today + estimated_request > probe.daily_token_cap {
         let obs = Observation {
@@ -40,32 +80,19 @@ pub async fn execute(state: &AppState, probe: &ProbeRow) -> Observation {
     let key = match state.secrets.decrypt(&probe.api_key_cipher) {
         Ok(key) => key,
         Err(_) => {
-            let obs = Observation {
-                id,
-                probe_id: probe.id.clone(),
-                started_at,
-                latency_ms: 0,
-                http_status: None,
-                outcome: "error".into(),
-                error_class: Some("configuration".into()),
-                detail: Some("Stored credential could not be decrypted".into()),
-                input_tokens: None,
-                output_tokens: None,
-                invariant_valid: 0,
-            };
+            let obs = configuration_error(&probe.id, id, started_at, "Stored credential could not be decrypted");
             save(state, &obs).await;
             return obs;
         }
     };
     let body = json!({
         "model": probe.model,
-        "messages": [{"role":"user", "content":probe.prompt}],
+        "messages": [{"role":"user", "content":prompt}],
         "max_tokens": probe.max_output_tokens,
         "response_format": {"type":"json_object"}
     });
     let begin = Instant::now();
-    let result = state
-        .client
+    let result = client
         .post(&probe.endpoint_url)
         .bearer_auth(key)
         .json(&body)
@@ -198,6 +225,22 @@ pub async fn execute(state: &AppState, probe: &ProbeRow) -> Observation {
     save(state, &obs).await;
     evaluate_alerts(state, probe).await;
     obs
+}
+
+fn configuration_error(probe_id: &str, id: String, started_at: String, detail: &str) -> Observation {
+    Observation {
+        id,
+        probe_id: probe_id.into(),
+        started_at,
+        latency_ms: 0,
+        http_status: None,
+        outcome: "error".into(),
+        error_class: Some("configuration".into()),
+        detail: Some(detail.into()),
+        input_tokens: None,
+        output_tokens: None,
+        invariant_valid: 0,
+    }
 }
 
 fn parse_json_content(raw: &str) -> Option<Value> {

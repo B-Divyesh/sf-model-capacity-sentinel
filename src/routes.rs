@@ -52,7 +52,7 @@ pub struct Summary {
 }
 
 pub async fn health() -> Json<Value> {
-    Json(json!({"status":"ok","build":option_env!("BUILD_SHA").unwrap_or("dev")}))
+    Json(json!({"status":"ok","build":std::env::var("BUILD_SHA").ok().or(option_env!("BUILD_SHA").map(str::to_owned)).unwrap_or_else(|| "dev".into())}))
 }
 
 pub async fn summary(State(s): State<AppState>) -> ApiResult<Json<Summary>> {
@@ -97,7 +97,6 @@ async fn view(s: &AppState, p: ProbeRow) -> ApiResult<ProbeView> {
         endpoint_url: p.endpoint_url,
         model: p.model,
         has_api_key: !p.api_key_cipher.is_empty(),
-        prompt: p.prompt,
         required_fields: fields,
         interval_minutes: p.interval_minutes,
         timeout_ms: p.timeout_ms,
@@ -113,7 +112,7 @@ async fn view(s: &AppState, p: ProbeRow) -> ApiResult<ProbeView> {
     })
 }
 
-fn validate(i: &ProbeInput, editing: bool) -> ApiResult<()> {
+async fn validate(i: &ProbeInput, editing: bool, allow_private_endpoints: bool) -> ApiResult<()> {
     if i.name.trim().is_empty() || i.name.len() > 80 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -134,7 +133,13 @@ fn validate(i: &ProbeInput, editing: bool) -> ApiResult<()> {
             "Endpoint must use HTTP or HTTPS".into(),
         ));
     }
-    if i.model.trim().is_empty() || i.prompt.trim().is_empty() {
+    if url.username() != "" || url.password().is_some() || url.host_str().is_none() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Endpoint must not contain credentials and must include a host".into(),
+        ));
+    }
+    if i.model.trim().is_empty() || (!editing && i.prompt.trim().is_empty()) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "Model and synthetic prompt are required".into(),
@@ -170,25 +175,80 @@ fn validate(i: &ProbeInput, editing: bool) -> ApiResult<()> {
             "Too many or overly long required fields".into(),
         ));
     }
-    Ok(())
+    resolve_public_endpoint(&url, allow_private_endpoints).await.map(|_| ())
+}
+
+pub(crate) async fn resolve_public_endpoint(url: &url::Url, allow_private_endpoints: bool) -> ApiResult<Vec<std::net::SocketAddr>> {
+    let host = url.host_str().expect("host checked above");
+    let port = url.port_or_known_default().unwrap_or(443);
+    let addresses = tokio::net::lookup_host((host, port)).await.map_err(|_| {
+        ApiError(StatusCode::BAD_REQUEST, "Endpoint host could not be resolved".into())
+    })?;
+    let addresses: Vec<_> = addresses.collect();
+    for address in &addresses {
+        if !allow_private_endpoints && !is_public_address(address.ip()) {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "Endpoint must resolve only to a public internet address".into(),
+            ));
+        }
+    }
+    if !addresses.is_empty() {
+        Ok(addresses)
+    } else {
+        Err(ApiError(StatusCode::BAD_REQUEST, "Endpoint host could not be resolved".into()))
+    }
+}
+
+fn is_public_address(address: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match address {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            !((a == 0)
+                || (a == 10)
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 127)
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && (b == 0 || b == 2 || b == 168))
+                || (a == 198 && (b == 18 || b == 19 || b == 51))
+                || (a == 203 && (b == 0 || b == 113))
+                || a >= 224)
+        }
+        IpAddr::V6(ip) => {
+            if let Some(v4) = ip.to_ipv4() {
+                return is_public_address(IpAddr::V4(v4));
+            }
+            let first = ip.segments()[0];
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (first & 0xffc0) == 0xfe80 // link local fe80::/10
+                || (first == 0x2001 && ip.segments()[1] == 0x0db8)) // documentation 2001:db8::/32
+        }
+    }
 }
 
 pub async fn create(
     State(s): State<AppState>,
     Json(i): Json<ProbeInput>,
 ) -> ApiResult<(StatusCode, Json<Value>)> {
-    validate(&i, false)?;
+    validate(&i, false, s.allow_private_endpoints).await?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let cipher = s.secrets.encrypt(&i.api_key).map_err(internal)?;
-    sqlx::query("INSERT INTO probes VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    let prompt_cipher = s.secrets.encrypt(i.prompt.trim()).map_err(internal)?;
+    sqlx::query("INSERT INTO probes(id,name,provider,endpoint_url,model,api_key_cipher,prompt,prompt_cipher,required_fields,interval_minutes,timeout_ms,latency_slo_ms,availability_slo_percent,max_output_tokens,daily_token_cap,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
         .bind(&id)
         .bind(i.name.trim())
         .bind(i.provider.trim())
         .bind(i.endpoint_url.trim())
         .bind(i.model.trim())
         .bind(cipher)
-        .bind(i.prompt.trim())
+        .bind("")
+        .bind(prompt_cipher)
         .bind(serde_json::to_string(&i.required_fields).unwrap())
         .bind(i.interval_minutes)
         .bind(i.timeout_ms)
@@ -210,7 +270,7 @@ pub async fn update(
     State(s): State<AppState>,
     Json(i): Json<ProbeInput>,
 ) -> ApiResult<Json<Value>> {
-    validate(&i, true)?;
+    validate(&i, true, s.allow_private_endpoints).await?;
     let existing: Option<String> =
         sqlx::query_scalar("SELECT api_key_cipher FROM probes WHERE id=?")
             .bind(&id)
@@ -223,8 +283,11 @@ pub async fn update(
     } else {
         s.secrets.encrypt(&i.api_key).map_err(internal)?
     };
-    sqlx::query("UPDATE probes SET name=?,provider=?,endpoint_url=?,model=?,api_key_cipher=?,prompt=?,required_fields=?,interval_minutes=?,timeout_ms=?,latency_slo_ms=?,availability_slo_percent=?,max_output_tokens=?,daily_token_cap=?,enabled=?,updated_at=? WHERE id=?")
-        .bind(i.name.trim()).bind(i.provider.trim()).bind(i.endpoint_url.trim()).bind(i.model.trim()).bind(cipher).bind(i.prompt.trim()).bind(serde_json::to_string(&i.required_fields).unwrap()).bind(i.interval_minutes).bind(i.timeout_ms).bind(i.latency_slo_ms).bind(i.availability_slo_percent).bind(i.max_output_tokens).bind(i.daily_token_cap).bind(i.enabled as i64).bind(Utc::now().to_rfc3339()).bind(&id).execute(&s.db).await.map_err(internal)?;
+    let old_prompt: String = sqlx::query_scalar("SELECT prompt_cipher FROM probes WHERE id=?")
+        .bind(&id).fetch_one(&s.db).await.map_err(internal)?;
+    let prompt_cipher = if i.prompt.trim().is_empty() { old_prompt } else { s.secrets.encrypt(i.prompt.trim()).map_err(internal)? };
+    sqlx::query("UPDATE probes SET name=?,provider=?,endpoint_url=?,model=?,api_key_cipher=?,prompt_cipher=?,required_fields=?,interval_minutes=?,timeout_ms=?,latency_slo_ms=?,availability_slo_percent=?,max_output_tokens=?,daily_token_cap=?,enabled=?,updated_at=? WHERE id=?")
+        .bind(i.name.trim()).bind(i.provider.trim()).bind(i.endpoint_url.trim()).bind(i.model.trim()).bind(cipher).bind(prompt_cipher).bind(serde_json::to_string(&i.required_fields).unwrap()).bind(i.interval_minutes).bind(i.timeout_ms).bind(i.latency_slo_ms).bind(i.availability_slo_percent).bind(i.max_output_tokens).bind(i.daily_token_cap).bind(i.enabled as i64).bind(Utc::now().to_rfc3339()).bind(&id).execute(&s.db).await.map_err(internal)?;
     Ok(Json(json!({"id":id})))
 }
 

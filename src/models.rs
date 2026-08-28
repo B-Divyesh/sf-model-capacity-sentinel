@@ -9,7 +9,7 @@ pub struct ProbeRow {
     pub endpoint_url: String,
     pub model: String,
     pub api_key_cipher: String,
-    pub prompt: String,
+    pub prompt_cipher: String,
     pub required_fields: String,
     pub interval_minutes: i64,
     pub timeout_ms: i64,
@@ -30,7 +30,6 @@ pub struct ProbeView {
     pub endpoint_url: String,
     pub model: String,
     pub has_api_key: bool,
-    pub prompt: String,
     pub required_fields: Vec<String>,
     pub interval_minutes: i64,
     pub timeout_ms: i64,
@@ -53,6 +52,9 @@ pub struct ProbeInput {
     pub model: String,
     #[serde(default)]
     pub api_key: String,
+    /// Required when creating a canary. Empty on edit retains the encrypted
+    /// canary, which is deliberately never returned by read endpoints.
+    #[serde(default)]
     pub prompt: String,
     #[serde(default)]
     pub required_fields: Vec<String>,

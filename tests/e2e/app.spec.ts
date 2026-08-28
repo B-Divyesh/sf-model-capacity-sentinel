@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
+const accessToken='e2e-access-token-that-is-at-least-24-chars';
+test.beforeEach(async({page})=>{
+  await page.addInitScript(token=>sessionStorage.setItem('capacity-sentinel-access',token),accessToken);
+});
+
 test('empty state, legal routes, and keyboard dialog work',async({page})=>{
   const consoleErrors:string[]=[];
   const failedResponses:string[]=[];
@@ -23,4 +28,15 @@ test('empty state, legal routes, and keyboard dialog work',async({page})=>{
   await page.goto('/terms');
   await expect(page.getByRole('heading',{level:1})).toHaveText('Terms of use.');
   expect([...consoleErrors,...failedResponses]).toEqual([]);
+});
+
+test('populated dashboard has no serious or critical accessibility violations',async({page},testInfo)=>{
+  const name=`Public endpoint specimen ${testInfo.project.name}`;
+  const created=await page.request.post('/api/probes',{headers:{Authorization:`Bearer ${accessToken}`},data:{name,provider:'Example',endpoint_url:'https://example.com/chat',model:'test-model',api_key:'test-key',prompt:'Synthetic QA probe only',required_fields:['status'],interval_minutes:5,timeout_ms:2000,latency_slo_ms:1000,availability_slo_percent:99,max_output_tokens:32,daily_token_cap:1000,enabled:true}});
+  expect(created.status()).toBe(201);
+  await page.goto('/');
+  await expect(page.getByText(name,{exact:true})).toBeVisible();
+  await expect(page.locator('.ticks[role="img"]').first()).toBeVisible();
+  const scan=await new AxeBuilder({page}).analyze();
+  expect(scan.violations.filter(v=>v.impact==='serious'||v.impact==='critical')).toEqual([]);
 });

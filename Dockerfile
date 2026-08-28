@@ -16,11 +16,12 @@ RUN cargo build --locked --release
 RUN mkdir /empty-data && chown 65532:65532 /empty-data
 
 FROM gcr.io/distroless/cc-debian12:nonroot
+ARG BUILD_SHA=unknown
 WORKDIR /app
 COPY --from=server /src/target/release/model-capacity-sentinel /app/sentinel
 COPY --from=web /src/dist /app/dist
 COPY --from=server --chown=65532:65532 /empty-data /data
-ENV PORT=8080 DATA_DIR=/data STATIC_DIR=/app/dist RUST_LOG=info
+ENV PORT=8080 DATA_DIR=/data STATIC_DIR=/app/dist RUST_LOG=info BUILD_SHA=$BUILD_SHA
 EXPOSE 8080
 VOLUME ["/data"]
 ENTRYPOINT ["/app/sentinel"]

@@ -38,8 +38,11 @@ use tower_http::{
 pub struct AppState {
     db: SqlitePool,
     secrets: SecretBox,
-    client: reqwest::Client,
     writes: Arc<Mutex<VecDeque<std::time::Instant>>>,
+    access_token: Arc<str>,
+    /// Only used by the in-process test harness; production never permits
+    /// private-network probe targets.
+    allow_private_endpoints: bool,
 }
 
 #[tokio::main]
@@ -60,13 +63,14 @@ async fn main() -> anyhow::Result<()> {
         .connect_with(opts)
         .await?;
     sqlx::migrate!().run(&db).await?;
+    let secrets = SecretBox::from_data_dir(&data_dir)?;
+    migrate_plaintext_canaries(&db, &secrets).await?;
     let state = AppState {
         db,
-        secrets: SecretBox::from_data_dir(&data_dir)?,
-        client: reqwest::Client::builder()
-            .user_agent("Capacity-Sentinel/0.1")
-            .build()?,
+        secrets,
         writes: Arc::new(Mutex::new(VecDeque::new())),
+        access_token: access_token(&data_dir)?,
+        allow_private_endpoints: false,
     };
     tokio::spawn(scheduler(state.clone()));
     let app = router(
@@ -82,14 +86,64 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<()> {
+    sqlx::query("PRAGMA secure_delete=ON").execute(db).await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, prompt FROM probes WHERE prompt_cipher='' AND prompt<>''",
+    )
+    .fetch_all(db)
+    .await?;
+    let migrated = !rows.is_empty();
+    for (id, prompt) in rows {
+        let encrypted = secrets.encrypt(&prompt)?;
+        sqlx::query("UPDATE probes SET prompt='', prompt_cipher=? WHERE id=?")
+            .bind(encrypted)
+            .bind(id)
+            .execute(db)
+            .await?;
+    }
+    // A pre-repair database can have text in its main file or WAL.  After
+    // replacing every legacy value, compact and truncate the WAL so the old
+    // canary bytes are not retained as historical pages.
+    if migrated {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(db).await?;
+        sqlx::query("VACUUM").execute(db).await?;
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(db).await?;
+    }
+    Ok(())
+}
+
+fn access_token(data_dir: &Path) -> anyhow::Result<Arc<str>> {
+    if let Ok(token) = std::env::var("SENTINEL_ACCESS_TOKEN") {
+        if token.len() < 24 {
+            anyhow::bail!("SENTINEL_ACCESS_TOKEN must be at least 24 characters");
+        }
+        return Ok(Arc::from(token));
+    }
+    let path = data_dir.join("access.token");
+    if let Ok(token) = std::fs::read_to_string(&path) {
+        return Ok(Arc::from(token.trim()));
+    }
+    use rand::RngCore;
+    let mut bytes = [0_u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let token = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        use std::io::Write;
+        file.write_all(token.as_bytes())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&path, &token)?;
+    Ok(Arc::from(token))
+}
+
 fn router(state: AppState, static_dir: &Path) -> Router {
     let index = static_dir.join("index.html");
     let fallback = ServeDir::new(static_dir);
-    Router::new()
-        .route_service("/", ServeFile::new(&index))
-        .route_service("/privacy", ServeFile::new(&index))
-        .route_service("/terms", ServeFile::new(&index))
-        .route("/health", get(routes::health))
+    let api = Router::new()
         .route("/api/summary", get(routes::summary))
         .route("/api/probes", post(routes::create))
         .route(
@@ -99,14 +153,63 @@ fn router(state: AppState, static_dir: &Path) -> Router {
         .route("/api/probes/{id}/run", post(routes::run))
         .route("/api/observations", get(routes::history))
         .route("/api/export.csv", get(routes::export))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_access));
+    Router::new()
+        .route_service("/", ServeFile::new(&index))
+        .route_service("/privacy", ServeFile::new(&index))
+        .route_service("/terms", ServeFile::new(&index))
+        .route("/health", get(routes::health))
+        .merge(api)
         .fallback_service(fallback)
         .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .with_state(state)
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(cache_control))
         .layer(RequestBodyLimitLayer::new(64 * 1024))
         .layer(CompressionLayer::new())
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
+}
+
+async fn require_access(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    use subtle::ConstantTimeEq;
+    let supplied = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let valid = supplied.is_some_and(|token| {
+        token.as_bytes().ct_eq(state.access_token.as_bytes()).into()
+    });
+    if valid {
+        next.run(req).await
+    } else {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            Json(serde_json::json!({"error":"A project access code is required"})),
+        ).into_response()
+    }
+}
+
+async fn cache_control(req: Request<Body>, next: Next) -> Response {
+    let path = req.uri().path().to_owned();
+    let mut res = next.run(req).await;
+    let value = if path.starts_with("/api/") || path == "/health" {
+        "no-store"
+    } else if path.starts_with("/assets/index-") {
+        "public, max-age=31536000, immutable"
+    } else if path == "/sw.js" || path == "/" || path == "/privacy" || path == "/terms" || path == "/index.html" {
+        "no-cache"
+    } else {
+        "public, max-age=86400"
+    };
+    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    res
 }
 
 async fn security_headers(req: Request<Body>, next: Next) -> Response {
@@ -186,6 +289,7 @@ async fn shutdown() {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+    use crate::{models::ProbeInput, routes::resolve_public_endpoint};
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -211,8 +315,9 @@ mod integration_tests {
         AppState {
             db,
             secrets: SecretBox::from_data_dir(dir).unwrap(),
-            client: reqwest::Client::new(),
             writes: Arc::new(Mutex::new(VecDeque::new())),
+            access_token: Arc::from("test-access-token-which-is-long-enough"),
+            allow_private_endpoints: true,
         }
     }
     fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
@@ -220,7 +325,17 @@ mod integration_tests {
             .method(method)
             .uri(uri)
             .header("content-type", "application/json")
+            .header("authorization", "Bearer test-access-token-which-is-long-enough")
             .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    fn authenticated_request(method: &str, uri: &str) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", "Bearer test-access-token-which-is-long-enough")
+            .body(Body::empty())
             .unwrap()
     }
 
@@ -258,6 +373,12 @@ mod integration_tests {
             .await
             .unwrap();
         assert!(!cipher.contains("secret-value"));
+        let stored_prompt: String = sqlx::query_scalar("SELECT prompt FROM probes WHERE id=?")
+            .bind(&id).fetch_one(&state.db).await.unwrap();
+        let prompt_cipher: String = sqlx::query_scalar("SELECT prompt_cipher FROM probes WHERE id=?")
+            .bind(&id).fetch_one(&state.db).await.unwrap();
+        assert!(stored_prompt.is_empty());
+        assert!(!prompt_cipher.contains("Return JSON"));
         for _ in 0..2 {
             let response = app
                 .clone()
@@ -272,11 +393,12 @@ mod integration_tests {
         }
         let response = app
             .clone()
-            .oneshot(Request::get("/api/summary").body(Body::empty()).unwrap())
+            .oneshot(authenticated_request("GET", "/api/summary"))
             .await
             .unwrap();
         let body = to_bytes(response.into_body(), 100_000).await.unwrap();
         let summary: Value = serde_json::from_slice(&body).unwrap();
+        assert!(summary["probes"][0].get("prompt").is_none());
         assert_eq!(summary["alerts"][0]["kind"], "availability");
         assert_eq!(summary["observations"][0]["error_class"], "capacity");
         let mut updated = input;
@@ -293,9 +415,7 @@ mod integration_tests {
         assert_eq!(
             app.clone()
                 .oneshot(
-                    Request::get("/api/observations")
-                        .body(Body::empty())
-                        .unwrap()
+                    authenticated_request("GET", "/api/observations")
                 )
                 .await
                 .unwrap()
@@ -304,7 +424,7 @@ mod integration_tests {
         );
         assert_eq!(
             app.clone()
-                .oneshot(Request::get("/api/export.csv").body(Body::empty()).unwrap())
+                .oneshot(authenticated_request("GET", "/api/export.csv"))
                 .await
                 .unwrap()
                 .status(),
@@ -314,8 +434,8 @@ mod integration_tests {
             app.clone()
                 .oneshot(
                     Request::delete(format!("/api/probes/{id}"))
-                        .body(Body::empty())
-                        .unwrap()
+                        .header("authorization", "Bearer test-access-token-which-is-long-enough")
+                        .body(Body::empty()).unwrap()
                 )
                 .await
                 .unwrap()
@@ -329,5 +449,35 @@ mod integration_tests {
                 .status(),
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn api_requires_an_access_code_and_rejects_private_probe_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state, temp.path());
+        assert_eq!(
+            app.clone().oneshot(Request::get("/api/summary").body(Body::empty()).unwrap()).await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let input = ProbeInput { name: "x".into(), provider: "x".into(), endpoint_url: "http://127.0.0.1:8080/chat".into(), model: "x".into(), api_key: "x".into(), prompt: "synthetic".into(), required_fields: vec![], interval_minutes: 5, timeout_ms: 1000, latency_slo_ms: 100, availability_slo_percent: 99.0, max_output_tokens: 1, daily_token_cap: 1, enabled: true };
+        assert!(resolve_public_endpoint(&url::Url::parse(&input.endpoint_url).unwrap(), false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_plaintext_canary_is_encrypted_and_scrubbed_on_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        sqlx::query("INSERT INTO probes(id,name,provider,endpoint_url,model,api_key_cipher,prompt,prompt_cipher,required_fields,interval_minutes,timeout_ms,latency_slo_ms,availability_slo_percent,max_output_tokens,daily_token_cap,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind("legacy").bind("Legacy").bind("Provider").bind("https://example.com/chat").bind("model")
+            .bind(state.secrets.encrypt("key").unwrap()).bind("Synthetic QA capacity only").bind("").bind("[]")
+            .bind(5).bind(1000).bind(100).bind(99.0).bind(1).bind(10).bind(1).bind("2026-01-01T00:00:00Z").bind("2026-01-01T00:00:00Z")
+            .execute(&state.db).await.unwrap();
+        migrate_plaintext_canaries(&state.db, &state.secrets).await.unwrap();
+        let (plain, cipher): (String, String) = sqlx::query_as("SELECT prompt,prompt_cipher FROM probes WHERE id='legacy'")
+            .fetch_one(&state.db).await.unwrap();
+        assert!(plain.is_empty());
+        assert!(!cipher.contains("Synthetic QA capacity only"));
+        assert_eq!(state.secrets.decrypt(&cipher).unwrap(), "Synthetic QA capacity only");
     }
 }

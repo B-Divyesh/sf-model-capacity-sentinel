@@ -6,11 +6,11 @@ It is not a production prompt proxy, model router, or semantic-quality judge. Pr
 
 ## Included in v1
 
-- OpenAI-compatible chat-completion probes against any HTTP(S) endpoint
+- OpenAI-compatible chat-completion probes against public HTTP(S) endpoints (private, loopback, link-local, and redirected targets are blocked)
 - Manual and scheduled observations with 429, timeout, network, upstream, invalid-JSON, and invariant-failure classification
 - Rolling availability and p95 latency evidence per provider/model
 - Alerts after two consecutive failures and automatic recovery resolution
-- AES-256-GCM API-key encryption with a unique local master key
+- AES-256-GCM encryption for API keys and synthetic canaries; canary text is never returned by the API
 - Daily per-probe token caps and response-token limits
 - Local SQLite storage and unrestricted CSV export
 - Keyboard/mobile-ready dashboard, offline/error/empty states, and privacy/terms pages
@@ -23,7 +23,7 @@ Prerequisites: Node 22+, npm, and Rust 1.90+.
 ```bash
 npm ci
 npm run build
-DATA_DIR=./data cargo run
+SENTINEL_ACCESS_TOKEN='replace-with-a-long-random-project-code' DATA_DIR=./data cargo run
 ```
 
 Open <http://localhost:8080>. The service creates `data/sentinel.db` and `data/master.key`; the key file is mode `0600` on Unix. Back up both together. To supply key material through a secret manager, set `SENTINEL_MASTER_KEY` (it is SHA-256-derived in memory and never logged).
@@ -32,7 +32,7 @@ For frontend development, run `npm run dev:server` and `npm run dev` in separate
 
 ## Configure a canary
 
-Provide the full OpenAI-compatible chat-completions URL, a provider label, model, API key, synthetic prompt, and optional comma-separated JSON dot paths such as `status, result.label`. The probe asks for a JSON object and checks that every declared path exists. It stores status, total request latency, token counts, and validation evidence—not response content.
+Provide the full public OpenAI-compatible chat-completions URL, a provider label, model, API key, synthetic prompt, and optional comma-separated JSON dot paths such as `status, result.label`. The probe asks for a JSON object and checks that every declared path exists. It stores status, total request latency, token counts, and validation evidence—not response content or plaintext canary text. Endpoint DNS is checked on save and again before every run; the run is pinned to the approved addresses and redirects are not followed.
 
 The scheduler checks for due probes every 30 seconds. A probe interval can be 1–1,440 minutes. Two consecutive failures raise an availability alert; three or more samples above the p95 objective raise a latency alert. Recovered conditions resolve their open alert.
 
@@ -48,8 +48,8 @@ npm run build     # production frontend -> dist/
 ## Container deployment
 
 ```bash
-docker build --build-arg BUILD_SHA=$(git rev-parse --short HEAD) -t capacity-sentinel .
-docker run --rm -p 8080:8080 -v sentinel-data:/data capacity-sentinel
+docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t capacity-sentinel .
+docker run --rm -p 8080:8080 -e SENTINEL_ACCESS_TOKEN='replace-with-a-long-random-project-code' -v sentinel-data:/data capacity-sentinel
 ```
 
 The multi-stage image runs as a non-root distroless user, exposes port 8080, serves the built frontend, and persists SQLite plus encryption material under `/data`. `/health` returns status and the compile-time build SHA.
@@ -60,9 +60,10 @@ The multi-stage image runs as a non-root distroless user, exposes port 8080, ser
 | `DATA_DIR` | `./data` | SQLite and generated key directory |
 | `STATIC_DIR` | `dist` | Built frontend directory |
 | `SENTINEL_MASTER_KEY` | generated local key | External master-key material |
+| `SENTINEL_ACCESS_TOKEN` | generated 32-byte token in `DATA_DIR/access.token` | Required project access code for all API data and writes; set explicitly for deployed instances |
 | `RUST_LOG` | environment default | Structured JSON log filter |
 
-Place internet-exposed self-hosted instances behind your organization’s authentication gateway. Cross-origin browser calls are not enabled, request bodies are capped at 64 KB, and API credentials are never returned by the API.
+Every API endpoint requires the project access code, including summaries and CSV export. The dashboard keeps it only in browser session storage. Cross-origin browser calls are not enabled, request bodies are capped at 64 KB, and credentials and canary text are never returned by the API.
 
 ## Load smoke
 
