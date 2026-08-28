@@ -63,7 +63,7 @@ The multi-stage image runs as a non-root distroless user, exposes port 8080, ser
 | `SENTINEL_ACCESS_TOKEN` | generated 32-byte token in `DATA_DIR/access.token` | Required project access code for all API data and writes; set explicitly for deployed instances |
 | `RUST_LOG` | `info` | Structured JSON log filter |
 
-Every API endpoint requires the project access code, including summaries and CSV export. The dashboard keeps it only in browser session storage. Cross-origin browser calls are not enabled, request bodies are capped at 64 KB, and credentials and canary text are never returned by the API.
+Every API endpoint requires the project access code, including summaries and CSV export. The dashboard keeps it only in browser session storage. API traffic is limited per originating client (the first trusted `X-Forwarded-For` hop, with socket-peer fallback): all requests allow a burst of 40 and replenish at 20/second, while writes allow a burst of 20 and replenish at 4/second. Limit responses are `429` with `Retry-After`. Cross-origin browser calls are not enabled, request bodies are capped at 64 KB, and credentials and canary text are never returned by the API.
 
 At startup the service writes a structured `startup_configuration` record describing whether paths and ports use supplied or default values and whether each secret was supplied, persisted, or generated. Secret values are never logged.
 

@@ -19,13 +19,15 @@ use sqlx::{
     SqlitePool,
 };
 use std::{
-    collections::VecDeque,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
     time::Duration,
 };
-use tokio::sync::Mutex;
+use tower_governor::{
+    governor::GovernorConfigBuilder, key_extractor::KeyExtractor, GovernorError, GovernorLayer,
+};
 use tower_http::{
     catch_panic::CatchPanicLayer,
     compression::CompressionLayer,
@@ -38,7 +40,6 @@ use tower_http::{
 pub struct AppState {
     db: SqlitePool,
     secrets: SecretBox,
-    writes: Arc<Mutex<VecDeque<std::time::Instant>>>,
     access_token: Arc<str>,
     /// Only used by the in-process test harness; production never permits
     /// private-network probe targets.
@@ -74,7 +75,6 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         db,
         secrets,
-        writes: Arc::new(Mutex::new(VecDeque::new())),
         access_token,
         allow_private_endpoints: false,
     };
@@ -87,8 +87,16 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(
         event = "startup_configuration",
-        data_dir_source = if data_dir_supplied { "supplied" } else { "default" },
-        static_dir_source = if static_dir_supplied { "supplied" } else { "default" },
+        data_dir_source = if data_dir_supplied {
+            "supplied"
+        } else {
+            "default"
+        },
+        static_dir_source = if static_dir_supplied {
+            "supplied"
+        } else {
+            "default"
+        },
         port_source = if port_supplied { "supplied" } else { "default" },
         master_key_source,
         access_token_source,
@@ -96,19 +104,21 @@ async fn main() -> anyhow::Result<()> {
         "startup configuration sources"
     );
     tracing::info!(port=%port,"capacity sentinel listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown())
+    .await?;
     Ok(())
 }
 
 async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<()> {
     sqlx::query("PRAGMA secure_delete=ON").execute(db).await?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, prompt FROM probes WHERE prompt_cipher='' AND prompt<>''",
-    )
-    .fetch_all(db)
-    .await?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, prompt FROM probes WHERE prompt_cipher='' AND prompt<>''")
+            .fetch_all(db)
+            .await?;
     let migrated = !rows.is_empty();
     for (id, prompt) in rows {
         let encrypted = secrets.encrypt(&prompt)?;
@@ -122,9 +132,13 @@ async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> any
     // replacing every legacy value, compact and truncate the WAL so the old
     // canary bytes are not retained as historical pages.
     if migrated {
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(db).await?;
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(db)
+            .await?;
         sqlx::query("VACUUM").execute(db).await?;
-        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(db).await?;
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(db)
+            .await?;
     }
     Ok(())
 }
@@ -147,7 +161,11 @@ fn access_token(data_dir: &Path) -> anyhow::Result<(Arc<str>, &'static str)> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
         use std::io::Write;
         file.write_all(token.as_bytes())?;
     }
@@ -159,6 +177,27 @@ fn access_token(data_dir: &Path) -> anyhow::Result<(Arc<str>, &'static str)> {
 fn router(state: AppState, static_dir: &Path) -> Router {
     let index = static_dir.join("index.html");
     let fallback = ServeDir::new(static_dir);
+    // General API traffic gets a 20 req/s, burst-40 budget. Mutating routes
+    // additionally get a stricter 4 req/s, burst-20 budget. Both budgets are
+    // per client at the trusted ingress boundary.
+    let api_limit = GovernorConfigBuilder::default()
+        .per_millisecond(50)
+        .burst_size(40)
+        .key_extractor(ClientIp)
+        .finish()
+        .expect("valid API rate-limit configuration");
+    let write_limit = GovernorConfigBuilder::default()
+        .per_millisecond(250)
+        .burst_size(20)
+        .methods(vec![
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::PATCH,
+            axum::http::Method::DELETE,
+        ])
+        .key_extractor(ClientIp)
+        .finish()
+        .expect("valid write rate-limit configuration");
     let api = Router::new()
         .route("/api/summary", get(routes::summary))
         .route("/api/probes", post(routes::create))
@@ -169,7 +208,12 @@ fn router(state: AppState, static_dir: &Path) -> Router {
         .route("/api/probes/{id}/run", post(routes::run))
         .route("/api/observations", get(routes::history))
         .route("/api/export.csv", get(routes::export))
-        .route_layer(middleware::from_fn_with_state(state.clone(), require_access));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_access,
+        ))
+        .layer(GovernorLayer::new(write_limit).error_handler(rate_limit_response))
+        .layer(GovernorLayer::new(api_limit).error_handler(rate_limit_response));
     Router::new()
         .route_service("/", ServeFile::new(&index))
         .route_service("/privacy", ServeFile::new(&index))
@@ -177,7 +221,6 @@ fn router(state: AppState, static_dir: &Path) -> Router {
         .route("/health", get(routes::health))
         .merge(api)
         .fallback_service(fallback)
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
         .with_state(state)
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(cache_control))
@@ -185,6 +228,92 @@ fn router(state: AppState, static_dir: &Path) -> Router {
         .layer(CompressionLayer::new())
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
+}
+
+/// Resolve the client at the factory ingress boundary. The ingress supplies
+/// `X-Forwarded-For`; its first hop is the originating client. Native and
+/// self-hosted requests safely fall back to axum's transport peer address.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ClientIp;
+
+impl KeyExtractor for ClientIp {
+    type Key = IpAddr;
+
+    fn name(&self) -> &'static str {
+        "first forwarded or peer IP"
+    }
+
+    fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
+        if let Some(forwarded) = req.headers().get("x-forwarded-for") {
+            let first = forwarded
+                .to_str()
+                .ok()
+                .and_then(|value| value.split(',').next())
+                .map(str::trim)
+                .and_then(|value| value.parse::<IpAddr>().ok())
+                .ok_or(GovernorError::UnableToExtractKey)?;
+            return Ok(first);
+        }
+
+        req.extensions()
+            .get::<axum::extract::ConnectInfo<SocketAddr>>()
+            .map(|peer| peer.0.ip())
+            .or_else(|| req.extensions().get::<SocketAddr>().map(SocketAddr::ip))
+            .ok_or(GovernorError::UnableToExtractKey)
+    }
+
+    fn key_name(&self, key: &Self::Key) -> Option<String> {
+        Some(key.to_string())
+    }
+}
+
+fn rate_limit_response(error: GovernorError) -> axum::http::Response<Body> {
+    match error {
+        GovernorError::TooManyRequests { wait_time, headers } => {
+            // Retry-After uses whole seconds. Governor reports a floored value,
+            // so round up to avoid inviting a retry before a token is ready.
+            let retry_after = wait_time.saturating_add(1).max(1);
+            let mut response = (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({
+                    "error": "Too many requests; retry after the indicated delay"
+                })),
+            )
+                .into_response();
+            if let Some(headers) = headers {
+                response.headers_mut().extend(headers);
+            }
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from_str(&retry_after.to_string())
+                    .expect("integer Retry-After is a valid header"),
+            );
+            response.headers_mut().insert(
+                header::HeaderName::from_static("x-ratelimit-after"),
+                HeaderValue::from_str(&retry_after.to_string())
+                    .expect("integer reset delay is a valid header"),
+            );
+            response
+        }
+        GovernorError::UnableToExtractKey => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error":"Unable to identify request client"})),
+        )
+            .into_response(),
+        GovernorError::Other { code, msg, headers } => {
+            let mut response = (
+                code,
+                Json(serde_json::json!({
+                    "error": msg.unwrap_or_else(|| "Rate limiter error".into())
+                })),
+            )
+                .into_response();
+            if let Some(headers) = headers {
+                response.headers_mut().extend(headers);
+            }
+            response
+        }
+    }
 }
 
 async fn require_access(
@@ -198,9 +327,8 @@ async fn require_access(
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let valid = supplied.is_some_and(|token| {
-        token.as_bytes().ct_eq(state.access_token.as_bytes()).into()
-    });
+    let valid =
+        supplied.is_some_and(|token| token.as_bytes().ct_eq(state.access_token.as_bytes()).into());
     if valid {
         next.run(req).await
     } else {
@@ -208,7 +336,8 @@ async fn require_access(
             axum::http::StatusCode::UNAUTHORIZED,
             [(header::WWW_AUTHENTICATE, "Bearer")],
             Json(serde_json::json!({"error":"A project access code is required"})),
-        ).into_response()
+        )
+            .into_response()
     }
 }
 
@@ -219,12 +348,18 @@ async fn cache_control(req: Request<Body>, next: Next) -> Response {
         "no-store"
     } else if path.starts_with("/assets/index-") {
         "public, max-age=31536000, immutable"
-    } else if path == "/sw.js" || path == "/" || path == "/privacy" || path == "/terms" || path == "/index.html" {
+    } else if path == "/sw.js"
+        || path == "/"
+        || path == "/privacy"
+        || path == "/terms"
+        || path == "/index.html"
+    {
         "no-cache"
     } else {
         "public, max-age=86400"
     };
-    res.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static(value));
     res
 }
 
@@ -242,33 +377,6 @@ async fn security_headers(req: Request<Body>, next: Next) -> Response {
     );
     h.insert(header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'self'; img-src 'self' data:; style-src 'self'; connect-src 'self' https://api.sociobot.in; script-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self' https://api.sociobot.in"));
     res
-}
-
-async fn rate_limit(
-    axum::extract::State(state): axum::extract::State<AppState>,
-    req: Request<Body>,
-    next: Next,
-) -> Response {
-    let is_write = req.uri().path().starts_with("/api/") && req.method() != axum::http::Method::GET;
-    if is_write {
-        let now = std::time::Instant::now();
-        let mut writes = state.writes.lock().await;
-        while writes
-            .front()
-            .is_some_and(|at| now.duration_since(*at) > Duration::from_secs(60))
-        {
-            writes.pop_front();
-        }
-        if writes.len() >= 60 {
-            return (
-                axum::http::StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({"error":"Too many changes; try again in one minute"})),
-            )
-                .into_response();
-        }
-        writes.push_back(now);
-    }
-    next.run(req).await
 }
 
 async fn scheduler(state: AppState) {
@@ -331,7 +439,6 @@ mod integration_tests {
         AppState {
             db,
             secrets: SecretBox::from_data_dir(dir).unwrap(),
-            writes: Arc::new(Mutex::new(VecDeque::new())),
             access_token: Arc::from("test-access-token-which-is-long-enough"),
             allow_private_endpoints: true,
         }
@@ -341,7 +448,11 @@ mod integration_tests {
             .method(method)
             .uri(uri)
             .header("content-type", "application/json")
-            .header("authorization", "Bearer test-access-token-which-is-long-enough")
+            .header(
+                "authorization",
+                "Bearer test-access-token-which-is-long-enough",
+            )
+            .header("x-forwarded-for", "192.0.2.10, 10.0.0.5")
             .body(Body::from(body.to_string()))
             .unwrap()
     }
@@ -350,7 +461,11 @@ mod integration_tests {
         Request::builder()
             .method(method)
             .uri(uri)
-            .header("authorization", "Bearer test-access-token-which-is-long-enough")
+            .header(
+                "authorization",
+                "Bearer test-access-token-which-is-long-enough",
+            )
+            .header("x-forwarded-for", "192.0.2.10, 10.0.0.5")
             .body(Body::empty())
             .unwrap()
     }
@@ -390,9 +505,16 @@ mod integration_tests {
             .unwrap();
         assert!(!cipher.contains("secret-value"));
         let stored_prompt: String = sqlx::query_scalar("SELECT prompt FROM probes WHERE id=?")
-            .bind(&id).fetch_one(&state.db).await.unwrap();
-        let prompt_cipher: String = sqlx::query_scalar("SELECT prompt_cipher FROM probes WHERE id=?")
-            .bind(&id).fetch_one(&state.db).await.unwrap();
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        let prompt_cipher: String =
+            sqlx::query_scalar("SELECT prompt_cipher FROM probes WHERE id=?")
+                .bind(&id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
         assert!(stored_prompt.is_empty());
         assert!(!prompt_cipher.contains("Return JSON"));
         for _ in 0..2 {
@@ -430,9 +552,7 @@ mod integration_tests {
         );
         assert_eq!(
             app.clone()
-                .oneshot(
-                    authenticated_request("GET", "/api/observations")
-                )
+                .oneshot(authenticated_request("GET", "/api/observations"))
                 .await
                 .unwrap()
                 .status(),
@@ -450,8 +570,13 @@ mod integration_tests {
             app.clone()
                 .oneshot(
                     Request::delete(format!("/api/probes/{id}"))
-                        .header("authorization", "Bearer test-access-token-which-is-long-enough")
-                        .body(Body::empty()).unwrap()
+                        .header(
+                            "authorization",
+                            "Bearer test-access-token-which-is-long-enough"
+                        )
+                        .header("x-forwarded-for", "192.0.2.10, 10.0.0.5")
+                        .body(Body::empty())
+                        .unwrap()
                 )
                 .await
                 .unwrap()
@@ -475,11 +600,173 @@ mod integration_tests {
         let state = test_state(temp.path()).await;
         let app = router(state, temp.path());
         assert_eq!(
-            app.clone().oneshot(Request::get("/api/summary").body(Body::empty()).unwrap()).await.unwrap().status(),
+            app.clone()
+                .oneshot(
+                    Request::get("/api/summary")
+                        .header("x-forwarded-for", "192.0.2.10")
+                        .body(Body::empty())
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
             StatusCode::UNAUTHORIZED
         );
-        let input = ProbeInput { name: "x".into(), provider: "x".into(), endpoint_url: "http://127.0.0.1:8080/chat".into(), model: "x".into(), api_key: "x".into(), prompt: "synthetic".into(), required_fields: vec![], interval_minutes: 5, timeout_ms: 1000, latency_slo_ms: 100, availability_slo_percent: 99.0, max_output_tokens: 1, daily_token_cap: 1, enabled: true };
-        assert!(resolve_public_endpoint(&url::Url::parse(&input.endpoint_url).unwrap(), false).await.is_err());
+        let input = ProbeInput {
+            name: "x".into(),
+            provider: "x".into(),
+            endpoint_url: "http://127.0.0.1:8080/chat".into(),
+            model: "x".into(),
+            api_key: "x".into(),
+            prompt: "synthetic".into(),
+            required_fields: vec![],
+            interval_minutes: 5,
+            timeout_ms: 1000,
+            latency_slo_ms: 100,
+            availability_slo_percent: 99.0,
+            max_output_tokens: 1,
+            daily_token_cap: 1,
+            enabled: true,
+        };
+        assert!(
+            resolve_public_endpoint(&url::Url::parse(&input.endpoint_url).unwrap(), false)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn api_read_limit_uses_first_forwarded_ip_and_returns_retry_after() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(temp.path()).await, temp.path());
+        let mut requests = tokio::task::JoinSet::new();
+        for second_hop in 1..=41 {
+            let app = app.clone();
+            requests.spawn(async move {
+                app.oneshot(
+                    Request::get("/api/summary")
+                        .header(
+                            "authorization",
+                            "Bearer test-access-token-which-is-long-enough",
+                        )
+                        .header(
+                            "x-forwarded-for",
+                            format!("198.51.100.10, 10.0.0.{second_hop}"),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            });
+        }
+        let mut ok = 0;
+        let mut limited = Vec::new();
+        while let Some(result) = requests.join_next().await {
+            let response = result.unwrap();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                limited.push(response);
+            } else {
+                assert_eq!(response.status(), StatusCode::OK);
+                ok += 1;
+            }
+        }
+        assert_eq!(ok, 40);
+        assert_eq!(limited.len(), 1);
+        let retry_after = limited[0]
+            .headers()
+            .get(header::RETRY_AFTER)
+            .expect("429 must include Retry-After")
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert!(retry_after >= 1);
+
+        // All 41 later proxy hops were distinct, so the exhausted shared
+        // quota proves only the first forwarded hop is used. A different
+        // originating client still has an independent budget.
+        let other_client = app
+            .oneshot(
+                Request::get("/api/summary")
+                    .header(
+                        "authorization",
+                        "Bearer test-access-token-which-is-long-enough",
+                    )
+                    .header("x-forwarded-for", "198.51.100.11, 10.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_client.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_write_limit_is_stricter_per_client_and_returns_retry_after() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(temp.path()).await, temp.path());
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..21 {
+            let app = app.clone();
+            requests.spawn(async move {
+                app.oneshot(
+                    Request::post("/api/probes")
+                        .header(
+                            "authorization",
+                            "Bearer test-access-token-which-is-long-enough",
+                        )
+                        .header("content-type", "application/json")
+                        .header("x-forwarded-for", "203.0.113.20, 10.0.0.5")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            });
+        }
+        let mut validation_errors = 0;
+        let mut limited = Vec::new();
+        while let Some(result) = requests.join_next().await {
+            let response = result.unwrap();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                limited.push(response);
+            } else {
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                validation_errors += 1;
+            }
+        }
+        assert_eq!(validation_errors, 20);
+        assert_eq!(limited.len(), 1);
+        assert!(limited[0].headers().contains_key(header::RETRY_AFTER));
+
+        let other_client = app
+            .oneshot(
+                Request::post("/api/probes")
+                    .header(
+                        "authorization",
+                        "Bearer test-access-token-which-is-long-enough",
+                    )
+                    .header("content-type", "application/json")
+                    .header("x-forwarded-for", "203.0.113.21, 10.0.0.5")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_client.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn client_ip_falls_back_to_transport_peer_without_forwarded_header() {
+        let mut request = Request::new(Body::empty());
+        request.extensions_mut().insert(axum::extract::ConnectInfo(
+            "192.0.2.44:43123".parse::<SocketAddr>().unwrap(),
+        ));
+        assert_eq!(
+            ClientIp.extract(&request).unwrap(),
+            "192.0.2.44".parse::<IpAddr>().unwrap()
+        );
     }
 
     #[tokio::test]
@@ -491,11 +778,19 @@ mod integration_tests {
             .bind(state.secrets.encrypt("key").unwrap()).bind("Synthetic QA capacity only").bind("").bind("[]")
             .bind(5).bind(1000).bind(100).bind(99.0).bind(1).bind(10).bind(1).bind("2026-01-01T00:00:00Z").bind("2026-01-01T00:00:00Z")
             .execute(&state.db).await.unwrap();
-        migrate_plaintext_canaries(&state.db, &state.secrets).await.unwrap();
-        let (plain, cipher): (String, String) = sqlx::query_as("SELECT prompt,prompt_cipher FROM probes WHERE id='legacy'")
-            .fetch_one(&state.db).await.unwrap();
+        migrate_plaintext_canaries(&state.db, &state.secrets)
+            .await
+            .unwrap();
+        let (plain, cipher): (String, String) =
+            sqlx::query_as("SELECT prompt,prompt_cipher FROM probes WHERE id='legacy'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
         assert!(plain.is_empty());
         assert!(!cipher.contains("Synthetic QA capacity only"));
-        assert_eq!(state.secrets.decrypt(&cipher).unwrap(), "Synthetic QA capacity only");
+        assert_eq!(
+            state.secrets.decrypt(&cipher).unwrap(),
+            "Synthetic QA capacity only"
+        );
     }
 }
