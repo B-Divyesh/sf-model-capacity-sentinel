@@ -52,7 +52,7 @@ docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t capacity-sentinel .
 docker run --rm -p 8080:8080 -e SENTINEL_ACCESS_TOKEN='replace-with-a-long-random-project-code' -v sentinel-data:/data capacity-sentinel
 ```
 
-The multi-stage image runs as a non-root distroless user, exposes port 8080, serves the built frontend, and persists SQLite plus encryption material under `/data`. `/health` returns status and the compile-time build SHA.
+The multi-stage image runs as a non-root distroless user, exposes port 8080, serves the built frontend, and persists SQLite plus encryption material under `/data`. `/health` returns status and the immutable build SHA baked in by `--build-arg BUILD_SHA`; the same value is recorded in the image's OCI revision label.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -61,9 +61,11 @@ The multi-stage image runs as a non-root distroless user, exposes port 8080, ser
 | `STATIC_DIR` | `dist` | Built frontend directory |
 | `SENTINEL_MASTER_KEY` | generated local key | External master-key material |
 | `SENTINEL_ACCESS_TOKEN` | generated 32-byte token in `DATA_DIR/access.token` | Required project access code for all API data and writes; set explicitly for deployed instances |
-| `RUST_LOG` | environment default | Structured JSON log filter |
+| `RUST_LOG` | `info` | Structured JSON log filter |
 
 Every API endpoint requires the project access code, including summaries and CSV export. The dashboard keeps it only in browser session storage. Cross-origin browser calls are not enabled, request bodies are capped at 64 KB, and credentials and canary text are never returned by the API.
+
+At startup the service writes a structured `startup_configuration` record describing whether paths and ports use supplied or default values and whether each secret was supplied, persisted, or generated. Secret values are never logged.
 
 ## Load smoke
 

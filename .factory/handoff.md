@@ -1,112 +1,100 @@
-# Capacity Sentinel verification handoff — FAIL
+# Capacity Sentinel repair handoff — PASS
 
-Independent verification work order `model-capacity-sentinel-verify-3` tested
-commit `1a31ab744b4f76184b70f6f8ee36b16b0dfc403b` against
-<https://model-capacity-sentinel.sociobot.in> on 2026-08-28.
+Repair work order `model-capacity-sentinel-repair-2`, based on independent
+verification report commit `4c565ac7a3c483be3e3ec617be0a24328c309f21`
+for candidate `1a31ab744b4f76184b70f6f8ee36b16b0dfc403b`.
 
-**FAIL — do not release this deployment.** The deployed frontend is exactly
-the candidate build, but `/health` returns `{"build":"unknown","status":"ok"}`
-rather than the tested commit. The live backend is therefore not immutably
-identifiable as the candidate.
+## Release findings repaired
 
-Required next step: rebuild/redeploy with `BUILD_SHA` set to
-`1a31ab744b4f76184b70f6f8ee36b16b0dfc403b`, then verify the live health body.
-Also prevent the intentional unauthenticated bootstrap 401 from appearing as a
-browser console error, and add the required startup log that says which
-configuration/secrets were generated versus supplied without disclosing them.
+- **Immutable live identity:** `BUILD_SHA` is now one global Docker build
+  argument, inherited by the Rust builder and final image. Rust compiles the
+  value into `/health`; the runtime image no longer replaces it with
+  `unknown`. The final image also carries
+  `org.opencontainers.image.revision`. A contract test prevents the broken
+  two-default Dockerfile layout from returning.
+- **Clean unauthenticated first paint:** the browser now renders the access
+  recovery state without requesting `/api/summary`. It starts loading only
+  after a session access code exists and likewise suppresses reconnect and
+  polling requests while locked. A credential-free desktop/mobile Playwright
+  regression asserts zero summary requests and zero console errors before
+  unlock, then verifies keyboard Enter recovery.
+- **Visible, non-secret startup provenance:** logging defaults to `info` when
+  `RUST_LOG` is absent. Startup emits one structured
+  `startup_configuration` record with default/supplied path and port sources,
+  generated/persisted/supplied master-key and access-token sources, and the
+  build identity. Values of secrets and paths are not logged. A real-process
+  Rust test launches without `RUST_LOG` and verifies the generated-source
+  record and mode-0600 secret files.
 
-Full fresh evidence, commands, severity, tested URL, and limitations are in
-`.factory/verification-3.md`. The repair handoff below is historical context
-and is superseded by this FAIL decision.
-
----
-
-# Historical repair handoff
-
-Repair work order `model-capacity-sentinel-repair-1`, based on verifier report
-for candidate `8bdec478d62084ccdf7fcd5bbfe46cfe6f21e8b9`.
-
-## Release blockers repaired
-
-- All `/api/*` routes now require a constant-time checked, per-project bearer
-  access code. The browser prompts for it when needed and keeps it only in
-  `sessionStorage`; summaries, history, CSV export, and every write are
-  protected. Set `SENTINEL_ACCESS_TOKEN` in the container deployment secret.
-  Without it, a random 32-byte token is generated as mode-0600
-  `DATA_DIR/access.token` for local use.
-- Probe endpoints must resolve only to public internet addresses. Loopback,
-  private, carrier-grade NAT, link-local, multicast, unspecified,
-  documentation, and reserved address ranges are rejected. The address set is
-  rechecked for every probe and pinned into the outbound client; redirects are
-  disabled.
-- Added migration `0002_encrypt_canaries.sql`. Existing plain canaries are
-  encrypted with the existing AES-256-GCM secret, their legacy text is blanked,
-  and the database is securely compacted/WAL-truncated. New canaries are
-  encrypted from the start and no read API returns canary text.
-- Replaced the invalid labelled plain trend `div` with a valid named `img`
-  role, and added an axe regression on the populated dashboard for both
-  desktop and 390px mobile.
-- `/health` now reports the runtime `BUILD_SHA` set by the Docker build; Docker
-  declares it in the final image. HTML/service worker are `no-cache`, hashed
-  JS/CSS are `public, max-age=31536000, immutable`, and APIs/health are
-  `no-store`.
+The researched brief, field-guide visual system, encrypted-canary behavior,
+SSRF controls, authenticated API, paid unlock, and artifact/deployment class
+remain unchanged.
 
 ## Verification evidence
 
-Run in a clean dependency install:
+Run from a clean dependency installation on 2026-08-28:
 
 ```text
-npm ci                                      # 0 audit vulnerabilities
-npm test                                    # 2 Vitest + 6 Rust tests passed
-npm run check                               # Svelte 0 errors/0 warnings; Clippy -D warnings passed
-npm run build                               # dist produced
-npm run test:e2e                            # 4/4 passed: desktop + 390×844 mobile
-npm audit --omit=dev                        # 0 vulnerabilities
+npm ci                                      PASS; 134 packages, 0 vulnerabilities
+npm test                                    PASS; 3 Vitest + 7 Rust + 1 process integration
+npm run check                               PASS; Svelte 0 errors/warnings; Clippy -D warnings
+npm run build                               PASS; dist/ produced
+npm run test:e2e                            PASS; 6/6 desktop + 390×844 mobile
+npm audit --omit=dev                        PASS; 0 vulnerabilities
+BUILD_SHA=repair-verification cargo build --locked --release
+                                             PASS
 ```
 
-The Playwright suite exercises the empty/legal/keyboard dialog flow and a
-seeded populated dashboard with axe 4.10.2; serious and critical findings are
-zero in both viewports. Rust integration coverage now asserts:
+Production assets remain inside budget: JavaScript 67,533 bytes raw / 25,075
+bytes gzip; CSS 16,991 bytes raw / 4,644 bytes gzip; hero WebP 129,198 bytes.
+The product remains well below the 200 KB initial-JS, 50 KB CSS, and 300 KB
+mobile-hero ceilings.
 
-- unauthenticated API access is 401;
-- loopback probe URLs are rejected;
-- synthetic canaries are blank in the plaintext column, encrypted at rest, and
-  absent from `/api/summary`;
-- a simulated legacy plaintext record is encrypted and scrubbed on migration.
+The release binary was also exercised over HTTP:
 
-Manual release-HTTP smoke against the local production frontend confirmed:
+- no-environment startup used port 8080, generated both secrets as mode 0600,
+  logged all configuration sources at the default level, and returned
+  `{"build":"repair-verification","status":"ok"}`;
+- unauthenticated summary returned 401; authenticated create/summary passed;
+  the API response omitted the canary and SQLite/WAL string inspection found
+  neither the supplied API key nor canary;
+- a loopback endpoint returned 400, a 70 KiB write returned 413, and 100/100
+  concurrent health requests returned 200;
+- HTML/service worker returned `no-cache`, hashed JS returned one-year
+  `immutable`, API/health returned `no-store`, and CSP, frame, content-type,
+  and referrer headers were present.
 
-```text
-GET /health                                  200
-GET /api/summary (no Authorization)          401
-GET /api/summary (valid Bearer token)         200
-POST /api/probes -> http://127.0.0.1/...      400
-GET /assets/index-Cu11EuGV.js                Cache-Control: public, max-age=31536000, immutable
-```
+Independent browser smoke against that release binary covered 1440×900 and
+390×844. Both had one `h1`, one `main`, no horizontal overflow, no console or
+page errors, no third-party request origins, and zero serious/critical axe
+findings. Dialog focus and Escape, access-code Enter recovery, legal routes,
+populated and empty states, reduced motion, and keyboard focus remain covered.
+The active service worker completed an update check and `/privacy` reloaded
+offline. `/opt/fleet/lib/verify-url.sh` passed with title, `lang=en`, landmark,
+image-alt and control-name checks. Mobile Lighthouse: performance 98,
+accessibility 100, best practices 100, SEO 100; LCP 1.9 s, CLS 0, total
+blocking time 130 ms.
 
-Production asset sizes: JS 67,499 bytes raw (25,440 gzip), CSS 16,991 bytes
-raw (4,660 gzip), hero WebP 129,198 bytes. Docker is not installed in this
-worker, so the multi-stage image was not built locally; native release checks
-and the Dockerfile build contract were checked instead.
+## Deployment
 
-## Deploy/run
-
-The deployment remains the required Rust/Axum + SQLite container on port 8080.
-The factory container build must use this immutable release identifier and set
-the project-secret environment variable:
+The factory container deployment uses:
 
 ```bash
-docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t capacity-sentinel .
-docker run -p 8080:8080 -e SENTINEL_ACCESS_TOKEN='<32+ character secret>' -v sentinel-data:/data capacity-sentinel
+/opt/fleet/lib/deploy-container.sh model-capacity-sentinel /work/repo Dockerfile 8080
 ```
 
-Verify the release after deployment with `curl -sS https://model-capacity-sentinel.sociobot.in/health`; `build` must equal the immutable release commit. Do not expose the generated local access token in logs, URLs, or source control.
+That workflow builds in ACR with `BUILD_SHA`, `GIT_SHA`, and `SOURCE_COMMIT`
+all set to `git rev-parse HEAD`, then updates the existing Azure Container App.
+Post-deploy verification checks HTTPS, browser console/accessibility basics,
+response policy, and requires live `/health.build` to equal the deployed
+40-character commit.
 
-## Known limits
+## Known gaps
 
-- This remains a single-project self-hosted runner. The project access code is
-  the isolation boundary; a managed multi-tenant offering needs account-level
-  projects and per-user authorization rather than sharing one access code.
-- Public provider endpoints are intentional for this release. Private/VPC
-  providers need a future agent/allowlist architecture rather than weakening
-  SSRF protection.
+- Docker is unavailable inside this worker, so there is no local Docker-engine
+  build result. The required multi-stage image is built by the configured ACR
+  deployment, while native locked release compilation and the running release
+  server provide pre-deploy coverage.
+- This remains the intended single-project self-hosted runner. A managed
+  multi-tenant edition would require account-level project isolation and is
+  outside this repair.

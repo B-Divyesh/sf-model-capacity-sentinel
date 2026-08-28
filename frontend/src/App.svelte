@@ -19,9 +19,12 @@
   onMount(()=>{
     const incoming=consumeLicenseFromUrl();const token=incoming||storedToken();if(token){license={...license,checking:true,token};verifyLicense(token).then(v=>license=v)}
     const saved=sessionStorage.getItem('capacity-sentinel-access');if(saved){accessCode=saved;setAccessToken(saved)}
-    if(path==='/'||path==='/index.html')load();
-    const online=()=>{offline=false;load()},off=()=>offline=true;window.addEventListener('online',online);window.addEventListener('offline',off);
-    const timer=setInterval(()=>{if(!offline&&!document.hidden)load(false)},30000);
+    if(path==='/'||path==='/index.html'){
+      if(saved)load();
+      else{loading=false;accessNeeded=true}
+    }
+    const online=()=>{offline=false;if(accessCode)load()},off=()=>offline=true;window.addEventListener('online',online);window.addEventListener('offline',off);
+    const timer=setInterval(()=>{if(accessCode&&!offline&&!document.hidden)load(false)},30000);
     return()=>{window.removeEventListener('online',online);window.removeEventListener('offline',off);clearInterval(timer)};
   });
   async function load(show=true){if(show)loading=true;try{data=await api.summary();loadError='';accessNeeded=false}catch(e){accessNeeded=e instanceof ApiError&&e.status===401;loadError=accessNeeded?'':e instanceof Error?e.message:'Could not load observations'}finally{loading=false}}

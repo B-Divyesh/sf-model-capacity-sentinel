@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post, put},
     Json, Router,
 };
-use crypto::SecretBox;
+use crypto::{key_source, SecretBox};
 use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
@@ -49,8 +49,12 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .json()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
+    let data_dir_supplied = std::env::var_os("DATA_DIR").is_some();
     let data_dir = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into()));
     std::fs::create_dir_all(&data_dir)?;
     let db_url = format!("sqlite://{}", data_dir.join("sentinel.db").display());
@@ -63,22 +67,34 @@ async fn main() -> anyhow::Result<()> {
         .connect_with(opts)
         .await?;
     sqlx::migrate!().run(&db).await?;
+    let master_key_source = key_source(&data_dir);
     let secrets = SecretBox::from_data_dir(&data_dir)?;
     migrate_plaintext_canaries(&db, &secrets).await?;
+    let (access_token, access_token_source) = access_token(&data_dir)?;
     let state = AppState {
         db,
         secrets,
         writes: Arc::new(Mutex::new(VecDeque::new())),
-        access_token: access_token(&data_dir)?,
+        access_token,
         allow_private_endpoints: false,
     };
     tokio::spawn(scheduler(state.clone()));
-    let app = router(
-        state,
-        Path::new(&std::env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into())),
-    );
+    let static_dir_supplied = std::env::var_os("STATIC_DIR").is_some();
+    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into());
+    let app = router(state, Path::new(&static_dir));
+    let port_supplied = std::env::var_os("PORT").is_some();
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    tracing::info!(
+        event = "startup_configuration",
+        data_dir_source = if data_dir_supplied { "supplied" } else { "default" },
+        static_dir_source = if static_dir_supplied { "supplied" } else { "default" },
+        port_source = if port_supplied { "supplied" } else { "default" },
+        master_key_source,
+        access_token_source,
+        build = routes::build_identity(),
+        "startup configuration sources"
+    );
     tracing::info!(port=%port,"capacity sentinel listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
@@ -113,16 +129,16 @@ async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> any
     Ok(())
 }
 
-fn access_token(data_dir: &Path) -> anyhow::Result<Arc<str>> {
+fn access_token(data_dir: &Path) -> anyhow::Result<(Arc<str>, &'static str)> {
     if let Ok(token) = std::env::var("SENTINEL_ACCESS_TOKEN") {
         if token.len() < 24 {
             anyhow::bail!("SENTINEL_ACCESS_TOKEN must be at least 24 characters");
         }
-        return Ok(Arc::from(token));
+        return Ok((Arc::from(token), "supplied"));
     }
     let path = data_dir.join("access.token");
     if let Ok(token) = std::fs::read_to_string(&path) {
-        return Ok(Arc::from(token.trim()));
+        return Ok((Arc::from(token.trim()), "persisted"));
     }
     use rand::RngCore;
     let mut bytes = [0_u8; 32];
@@ -137,7 +153,7 @@ fn access_token(data_dir: &Path) -> anyhow::Result<Arc<str>> {
     }
     #[cfg(not(unix))]
     std::fs::write(&path, &token)?;
-    Ok(Arc::from(token))
+    Ok((Arc::from(token), "generated"))
 }
 
 fn router(state: AppState, static_dir: &Path) -> Router {
@@ -442,13 +458,15 @@ mod integration_tests {
                 .status(),
             StatusCode::NO_CONTENT
         );
-        assert_eq!(
-            app.oneshot(Request::get("/health").body(Body::empty()).unwrap())
-                .await
-                .unwrap()
-                .status(),
-            StatusCode::OK
-        );
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1_000).await.unwrap();
+        let health: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(health["build"], routes::build_identity());
+        assert_ne!(health["build"], "unknown");
     }
 
     #[tokio::test]

@@ -51,8 +51,15 @@ pub struct Summary {
     pub observations: Vec<Observation>,
 }
 
+pub(crate) const fn build_identity() -> &'static str {
+    match option_env!("BUILD_SHA") {
+        Some(build) => build,
+        None => "dev",
+    }
+}
+
 pub async fn health() -> Json<Value> {
-    Json(json!({"status":"ok","build":std::env::var("BUILD_SHA").ok().or(option_env!("BUILD_SHA").map(str::to_owned)).unwrap_or_else(|| "dev".into())}))
+    Json(json!({"status":"ok","build":build_identity()}))
 }
 
 pub async fn summary(State(s): State<AppState>) -> ApiResult<Json<Summary>> {

@@ -65,6 +65,16 @@ impl SecretBox {
     }
 }
 
+pub fn key_source(data_dir: &Path) -> &'static str {
+    if std::env::var_os("SENTINEL_MASTER_KEY").is_some() {
+        "supplied"
+    } else if data_dir.join("master.key").exists() {
+        "persisted"
+    } else {
+        "generated"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +85,13 @@ mod tests {
         let cipher = box_.encrypt("sk-example").unwrap();
         assert!(!cipher.contains("sk-example"));
         assert_eq!(box_.decrypt(&cipher).unwrap(), "sk-example");
+    }
+
+    #[test]
+    fn a_new_data_directory_reports_a_generated_key_source() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(key_source(dir.path()), "generated");
+        SecretBox::from_data_dir(dir.path()).unwrap();
+        assert_eq!(key_source(dir.path()), "persisted");
     }
 }
