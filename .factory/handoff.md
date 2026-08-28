@@ -1,4 +1,29 @@
-# Capacity Sentinel repair handoff — release ready
+# Capacity Sentinel QA handoff — PASS
+
+## Final independent verification (supersedes the repair narrative below)
+
+**PASS** on 2026-08-28 UTC for candidate
+`8793fb3538ebd965d259ff8248468df3a64a504c` and deployed URL
+<https://model-capacity-sentinel.sociobot.in>. No confirmed defects remain at
+any severity.
+
+The verifier ran a clean install, all unit/integration tests, Svelte/Clippy
+checks, production frontend and locked native release builds, desktop + 390px
+Playwright/axe checks, product API/error/alert/persistence/privacy flows,
+rate-limit bursts, PWA offline reload, response policy and bundle checks.
+The live health endpoint reports this exact SHA; both hashed frontend assets
+match the clean production build. The repaired API rate limit returned 429
+with `Retry-After: 1` (read quota 40/client; write quota 20/client).
+
+Complete exact evidence, limitations, and reproduction commands:
+[`.factory/verification-5.md`](verification-5.md).
+
+Docker and Lighthouse executables were not available in this verifier. The
+native release binary and live container identity were verified instead.
+
+---
+
+# Historical repair handoff — release ready
 
 Repair work order `model-capacity-sentinel-repair-3` addresses independent
 verification report commit `42d202a7b2ed7743b929674fc65e6afe646982e9`
