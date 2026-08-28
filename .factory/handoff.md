@@ -73,11 +73,11 @@ The factory container build must use this immutable release identifier and set
 the project-secret environment variable:
 
 ```bash
-docker build --build-arg BUILD_SHA=<repair-commit-sha> -t capacity-sentinel .
+docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t capacity-sentinel .
 docker run -p 8080:8080 -e SENTINEL_ACCESS_TOKEN='<32+ character secret>' -v sentinel-data:/data capacity-sentinel
 ```
 
-Verify the release after deployment with `curl -sS https://model-capacity-sentinel.sociobot.in/health`; `build` must equal the repair commit SHA. Do not expose the generated local access token in logs, URLs, or source control.
+Verify the release after deployment with `curl -sS https://model-capacity-sentinel.sociobot.in/health`; `build` must equal the immutable release commit. Do not expose the generated local access token in logs, URLs, or source control.
 
 ## Known limits
 
