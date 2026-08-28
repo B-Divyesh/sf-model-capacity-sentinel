@@ -1,141 +1,113 @@
-# Capacity Sentinel independent QA handoff — FAIL
+# Capacity Sentinel repair handoff — release ready
 
-Independent verification work order `model-capacity-sentinel-verify-4` tested
-candidate `53e982e1c063047c40bbdc2f6dc8385fb4a2ee18` on 2026-08-28 against
-<https://model-capacity-sentinel.sociobot.in>. Full evidence is in
-`.factory/verification-4.md`.
+Repair work order `model-capacity-sentinel-repair-3` addresses independent
+verification report commit `42d202a7b2ed7743b929674fc65e6afe646982e9`
+for candidate `53e982e1c063047c40bbdc2f6dc8385fb4a2ee18`.
 
-## Release decision
+## Release blocker repaired
 
-**FAIL — do not release.** The prior deployment identity defect is repaired:
-the live `/health` build is the exact candidate SHA and live JS/CSS hashes
-match the fresh build. The remaining blocker is mandatory API rate limiting:
-reads are unlimited; writes start returning 429 only at request 61 of a local
-burst; and those 429 responses have no `Retry-After` header. The limiter is
-global rather than keyed to the first `X-Forwarded-For` client IP.
+The global write-only `VecDeque` throttle was replaced with `tower_governor`
+limits at the API router boundary:
 
-Remediate the limiter to cover every API route per client and return
-`Retry-After` with every 429, then rerun independent verification.
+- every `/api/*` request is limited per client at 20 requests/second with a
+  burst of 40;
+- POST, PUT, PATCH, and DELETE additionally use a stricter 4 requests/second,
+  burst-20 budget;
+- the client key is the first IP in the trusted ingress
+  `X-Forwarded-For` chain, with axum's transport peer address as the native
+  and self-hosted fallback;
+- all 429 responses are JSON and include consistent, nonzero `Retry-After`
+  and `X-RateLimit-After` whole-second values;
+- `/health` remains exempt for deployment health checks.
 
-## What passed
+The server now starts with axum connection metadata enabled so the peer-IP
+fallback works in the actual process, not only in unit code. README deployment
+documentation records the quotas and keying behavior. The researched brief,
+field-guide interface, encrypted canary behavior, SSRF controls, access-code
+flow, paid unlock, and web-with-backend/container class are unchanged.
 
-- `npm ci`, `npm test`, `npm run check`, `npm run build`, and all 6 Playwright
-  desktop/mobile tests passed from the clean requested checkout.
-- A locked release build with `BUILD_SHA` returned the requested SHA from
-  `/health`; the live deployment returns the same SHA.
-- Synthetic canary, 429 alert attribution, validation/boundary errors,
-  encryption/no-prompt API response, private-endpoint rejection, SQLite secret
-  inspection, keyboard, responsive, axe, reduced motion, offline reload and
-  service-worker update checks passed.
-- Static budgets, same-origin normal browsing, CSP/security/cache headers, and
-  live asset equality passed.
+## Exact regression coverage
 
-## Verification limitations
+Three Rust tests were added alongside the route integration suite:
 
-Docker and Lighthouse are unavailable in this worker, so no local Docker-image
-or fresh Lighthouse result is claimed. Native locked release build, local
-runtime behavior, browser/PWA checks, and the deployed container identity were
-verified.
+- `api_read_limit_uses_first_forwarded_ip_and_returns_retry_after` concurrently
+  sends 41 authenticated reads with one first hop and 41 distinct later proxy
+  hops, asserts 40×200 plus 1×429 with positive `Retry-After`, then proves a
+  different first hop has an independent quota;
+- `api_write_limit_is_stricter_per_client_and_returns_retry_after`
+  concurrently sends 21 authenticated invalid writes, asserts 20×422 plus
+  1×429 with `Retry-After`, then proves another client still reaches validation;
+- `client_ip_falls_back_to_transport_peer_without_forwarded_header` verifies
+  the no-proxy connection fallback.
 
----
-
-# Previous repair handoff — superseded by verification 4
-
-Repair work order `model-capacity-sentinel-repair-2`, based on independent
-verification report commit `4c565ac7a3c483be3e3ec617be0a24328c309f21`
-for candidate `1a31ab744b4f76184b70f6f8ee36b16b0dfc403b`.
-
-## Release findings repaired
-
-- **Immutable live identity:** `BUILD_SHA` is now one global Docker build
-  argument, inherited by the Rust builder and final image. Rust compiles the
-  value into `/health`; the runtime image no longer replaces it with
-  `unknown`. The final image also carries
-  `org.opencontainers.image.revision`. A contract test prevents the broken
-  two-default Dockerfile layout from returning.
-- **Clean unauthenticated first paint:** the browser now renders the access
-  recovery state without requesting `/api/summary`. It starts loading only
-  after a session access code exists and likewise suppresses reconnect and
-  polling requests while locked. A credential-free desktop/mobile Playwright
-  regression asserts zero summary requests and zero console errors before
-  unlock, then verifies keyboard Enter recovery.
-- **Visible, non-secret startup provenance:** logging defaults to `info` when
-  `RUST_LOG` is absent. Startup emits one structured
-  `startup_configuration` record with default/supplied path and port sources,
-  generated/persisted/supplied master-key and access-token sources, and the
-  build identity. Values of secrets and paths are not logged. A real-process
-  Rust test launches without `RUST_LOG` and verifies the generated-source
-  record and mode-0600 secret files.
-
-The researched brief, field-guide visual system, encrypted-canary behavior,
-SSRF controls, authenticated API, paid unlock, and artifact/deployment class
-remain unchanged.
-
-## Verification evidence
-
-Run from a clean dependency installation on 2026-08-28:
+## Verification evidence — 2026-08-28 UTC
 
 ```text
 npm ci                                      PASS; 134 packages, 0 vulnerabilities
-npm test                                    PASS; 3 Vitest + 7 Rust + 1 process integration
+npm test                                    PASS; 3 Vitest + 10 Rust + 1 process test
 npm run check                               PASS; Svelte 0 errors/warnings; Clippy -D warnings
 npm run build                               PASS; dist/ produced
-npm run test:e2e                            PASS; 6/6 desktop + 390×844 mobile
+npm run test:e2e -- --reporter=line         PASS; 6/6 desktop + 390×844 mobile
 npm audit --omit=dev                        PASS; 0 vulnerabilities
-BUILD_SHA=repair-verification cargo build --locked --release
-                                             PASS
+BUILD_SHA=repair-predeploy cargo build
+  --locked --release                        PASS
 ```
 
-Production assets remain inside budget: JavaScript 67,533 bytes raw / 25,075
-bytes gzip; CSS 16,991 bytes raw / 4,644 bytes gzip; hero WebP 129,198 bytes.
-The product remains well below the 200 KB initial-JS, 50 KB CSS, and 300 KB
-mobile-hero ceilings.
+Direct bursts against that release binary produced:
 
-The release binary was also exercised over HTTP:
+```text
+100 concurrent GET /api/summary             40×200, 60×429; Retry-After: 1
+65 concurrent invalid POST /api/probes      20×422, 45×429; Retry-After: 1
+50 GET /api/summary without forwarding      40×200, 10×429; Retry-After: 1
+```
 
-- no-environment startup used port 8080, generated both secrets as mode 0600,
-  logged all configuration sources at the default level, and returned
-  `{"build":"repair-verification","status":"ok"}`;
-- unauthenticated summary returned 401; authenticated create/summary passed;
-  the API response omitted the canary and SQLite/WAL string inspection found
-  neither the supplied API key nor canary;
-- a loopback endpoint returned 400, a 70 KiB write returned 413, and 100/100
-  concurrent health requests returned 200;
-- HTML/service worker returned `no-cache`, hashed JS returned one-year
-  `immutable`, API/health returned `no-store`, and CSP, frame, content-type,
-  and referrer headers were present.
+The factory URL verifier reported title `Capacity Sentinel — model API
+canaries`, `lang=en`, one `h1`, one `main`, zero missing image alternatives,
+zero unlabeled buttons, and zero console errors. Playwright axe scans found no
+serious or critical findings in empty and populated states. Desktop and
+390×844 mobile browser tests covered access-code keyboard recovery, dialog
+focus/Escape, legal pages, responsive layout, and console/network errors.
 
-Independent browser smoke against that release binary covered 1440×900 and
-390×844. Both had one `h1`, one `main`, no horizontal overflow, no console or
-page errors, no third-party request origins, and zero serious/critical axe
-findings. Dialog focus and Escape, access-code Enter recovery, legal routes,
-populated and empty states, reduced motion, and keyboard focus remain covered.
-The active service worker completed an update check and `/privacy` reloaded
-offline. `/opt/fleet/lib/verify-url.sh` passed with title, `lang=en`, landmark,
-image-alt and control-name checks. Mobile Lighthouse: performance 98,
-accessibility 100, best practices 100, SEO 100; LCP 1.9 s, CLS 0, total
-blocking time 130 ms.
+The service worker completed `registration.update()` and reloaded `/privacy`
+offline while controlled; the 390px page had no horizontal overflow and no
+console errors. Local response checks confirmed CSP, `nosniff`, frame denial,
+no-referrer, API/health `no-store`, HTML/service-worker `no-cache`, one-year
+immutable hashed assets, and no cross-origin CORS grant.
+
+Fresh mobile Lighthouse results:
+
+| Category/metric | Result |
+|---|---:|
+| Performance | 100 |
+| Accessibility | 100 |
+| Best practices | 100 |
+| SEO | 100 |
+| LCP | 1.8 s |
+| CLS | 0 |
+| Total blocking time | 40 ms |
+
+Fresh production assets remain inside budget: JavaScript 67,533 bytes raw /
+25,075 gzip; CSS 16,991 / 4,644 gzip; hero WebP 129,198 bytes. No webfonts are
+shipped.
 
 ## Deployment
 
-The factory container deployment uses:
+The committed tree is deployed with the work-order configuration:
 
 ```bash
 /opt/fleet/lib/deploy-container.sh model-capacity-sentinel /work/repo Dockerfile 8080
 ```
 
-That workflow builds in ACR with `BUILD_SHA`, `GIT_SHA`, and `SOURCE_COMMIT`
-all set to `git rev-parse HEAD`, then updates the existing Azure Container App.
-Post-deploy verification checks HTTPS, browser console/accessibility basics,
-response policy, and requires live `/health.build` to equal the deployed
-40-character commit.
+That ACR workflow passes the committed SHA as `BUILD_SHA`, `GIT_SHA`, and
+`SOURCE_COMMIT`; `/health.build` is checked against the immutable deployed
+commit after rollout. Deployment and final live-identity evidence are reported
+with the worker result because the source commit must exist before its build
+identity can be produced.
 
 ## Known gaps
 
-- Docker is unavailable inside this worker, so there is no local Docker-engine
-  build result. The required multi-stage image is built by the configured ACR
-  deployment, while native locked release compilation and the running release
-  server provide pre-deploy coverage.
-- This remains the intended single-project self-hosted runner. A managed
-  multi-tenant edition would require account-level project isolation and is
-  outside this repair.
+- Docker is not installed in this worker. The native locked release binary was
+  built and exercised locally; the required multi-stage Dockerfile is built by
+  Azure Container Registry during deployment.
+- Managed multi-tenant probes remain outside this single-project self-hosted
+  product's researched scope. There are no known gaps in this repair.
