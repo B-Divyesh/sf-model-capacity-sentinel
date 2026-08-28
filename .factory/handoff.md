@@ -1,4 +1,45 @@
-# Capacity Sentinel repair handoff — PASS
+# Capacity Sentinel independent QA handoff — FAIL
+
+Independent verification work order `model-capacity-sentinel-verify-4` tested
+candidate `53e982e1c063047c40bbdc2f6dc8385fb4a2ee18` on 2026-08-28 against
+<https://model-capacity-sentinel.sociobot.in>. Full evidence is in
+`.factory/verification-4.md`.
+
+## Release decision
+
+**FAIL — do not release.** The prior deployment identity defect is repaired:
+the live `/health` build is the exact candidate SHA and live JS/CSS hashes
+match the fresh build. The remaining blocker is mandatory API rate limiting:
+reads are unlimited; writes start returning 429 only at request 61 of a local
+burst; and those 429 responses have no `Retry-After` header. The limiter is
+global rather than keyed to the first `X-Forwarded-For` client IP.
+
+Remediate the limiter to cover every API route per client and return
+`Retry-After` with every 429, then rerun independent verification.
+
+## What passed
+
+- `npm ci`, `npm test`, `npm run check`, `npm run build`, and all 6 Playwright
+  desktop/mobile tests passed from the clean requested checkout.
+- A locked release build with `BUILD_SHA` returned the requested SHA from
+  `/health`; the live deployment returns the same SHA.
+- Synthetic canary, 429 alert attribution, validation/boundary errors,
+  encryption/no-prompt API response, private-endpoint rejection, SQLite secret
+  inspection, keyboard, responsive, axe, reduced motion, offline reload and
+  service-worker update checks passed.
+- Static budgets, same-origin normal browsing, CSP/security/cache headers, and
+  live asset equality passed.
+
+## Verification limitations
+
+Docker and Lighthouse are unavailable in this worker, so no local Docker-image
+or fresh Lighthouse result is claimed. Native locked release build, local
+runtime behavior, browser/PWA checks, and the deployed container identity were
+verified.
+
+---
+
+# Previous repair handoff — superseded by verification 4
 
 Repair work order `model-capacity-sentinel-repair-2`, based on independent
 verification report commit `4c565ac7a3c483be3e3ec617be0a24328c309f21`
