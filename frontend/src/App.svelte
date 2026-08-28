@@ -33,6 +33,7 @@
   function fmt(date:string){return new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(date))}
   function status(p:Probe){if(!p.enabled)return'paused';if(!p.last_observation)return'awaiting';return p.last_observation.outcome}
   function probeName(id:string){return data.probes.find(p=>p.id===id)?.name||'Removed probe'}
+  function atlasStats(p:Probe){const rows=data.observations.filter(o=>o.probe_id===p.id);const ok=rows.filter(o=>o.outcome==='healthy').length;const latency=rows.filter(o=>o.http_status!==null).map(o=>o.latency_ms).sort((a,b)=>a-b);return{count:rows.length,availability:rows.length?ok/rows.length*100:0,p95:latency[Math.max(0,Math.ceil(latency.length*.95)-1)]||0}}
 </script>
 
 <a class="skip" href="#main">Skip to main content</a>
@@ -74,6 +75,8 @@
       {/each}</div>
     {/if}
   </section>
+
+  {#if license.unlocked && data.probes.length}<section class="atlas-notebook" aria-labelledby="notebook-title"><div class="section-heading"><div><p class="eyebrow">Atlas · 365-day notebook</p><h2 id="notebook-title">Cross-provider comparison</h2></div><span class="license-ok">✓ Licensed</span></div><div class="atlas-table"><div class="atlas-row atlas-head"><span>Provider / model</span><span>Observations</span><span>Availability</span><span>p95 latency</span></div>{#each data.probes as p}<div class="atlas-row"><b>{p.provider}<small>{p.model}</small></b><span>{atlasStats(p).count}</span><span>{atlasStats(p).availability.toFixed(1)}%</span><span>{atlasStats(p).p95} ms</span></div>{/each}</div></section>{/if}
 
   <section class="method" id="field-notes" aria-labelledby="method-title"><div class="method-intro"><p class="eyebrow">The field method</p><h2 id="method-title">Comparable evidence,<br>not another tracing proxy.</h2><p>Capacity Sentinel never sits in your production path. It asks each provider the same small, scheduled question and records only operational evidence.</p></div><ol><li><span>01</span><div><h3>Plant a synthetic canary</h3><p>Use a harmless prompt made for monitoring. Credentials stay encrypted on your host.</p></div></li><li><span>02</span><div><h3>Declare the invariant</h3><p>Name the JSON paths that must exist. We test shape, not subjective truth or universal “quality.”</p></div></li><li><span>03</span><div><h3>Watch the habitat change</h3><p>Two consecutive failures raise an attributed alert. Rolling p95 latency reveals slower drift.</p></div></li></ol></section>
 

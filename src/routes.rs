@@ -68,8 +68,7 @@ pub async fn summary(State(s): State<AppState>) -> ApiResult<Json<Summary>> {
         .fetch_all(&s.db)
         .await
         .map_err(internal)?;
-    let observations =
-        sqlx::query_as("SELECT * FROM observations ORDER BY started_at DESC LIMIT 100")
+    let observations = sqlx::query_as("SELECT * FROM observations WHERE started_at >= datetime('now','-365 days') ORDER BY started_at DESC LIMIT 5000")
             .fetch_all(&s.db)
             .await
             .map_err(internal)?;

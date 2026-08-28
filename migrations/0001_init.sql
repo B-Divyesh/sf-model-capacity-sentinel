@@ -1,4 +1,3 @@
-PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS probes (
@@ -46,4 +45,3 @@ CREATE TABLE IF NOT EXISTS alerts (
   resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_probe_status ON alerts(probe_id, status, opened_at DESC);
-

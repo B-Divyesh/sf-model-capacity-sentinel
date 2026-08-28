@@ -13,7 +13,9 @@ pub async fn execute(state: &AppState, probe: &ProbeRow) -> Observation {
     let used_today: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(COALESCE(input_tokens,0)+COALESCE(output_tokens,0)),0) FROM observations WHERE probe_id=? AND started_at >= date('now')"
     ).bind(&probe.id).fetch_one(&state.db).await.unwrap_or(0);
-    if used_today >= probe.daily_token_cap {
+    let estimated_input = ((probe.prompt.chars().count() as i64 + 3) / 4).max(1);
+    let estimated_request = estimated_input + probe.max_output_tokens;
+    if used_today + estimated_request > probe.daily_token_cap {
         let obs = Observation {
             id,
             probe_id: probe.id.clone(),
@@ -124,10 +126,12 @@ pub async fn execute(state: &AppState, probe: &ProbeRow) -> Observation {
             } else {
                 let input_tokens = value
                     .pointer("/usage/prompt_tokens")
-                    .and_then(Value::as_i64);
+                    .and_then(Value::as_i64)
+                    .or(Some(estimated_input));
                 let output_tokens = value
                     .pointer("/usage/completion_tokens")
-                    .and_then(Value::as_i64);
+                    .and_then(Value::as_i64)
+                    .or(Some(probe.max_output_tokens));
                 let content = value.pointer("/choices/0/message/content");
                 let parsed = match content {
                     Some(Value::String(s)) => parse_json_content(s),
