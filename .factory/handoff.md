@@ -1,4 +1,32 @@
-# Capacity Sentinel QA handoff — PASS
+# Capacity Sentinel review 1 handoff — FAIL
+
+Independent review on 2026-09-05 found **9 findings and 26 untested public
+claims**. Product code was not modified. The full evidence and required fixes
+are in [`.factory/review-1.md`](review-1.md).
+
+The implementation reviewed is
+`301106fc3e2fbafc493fc2d34c7b5e5d45efe63b`. Live health reports
+`8793fb3538ebd965d259ff8248468df3a64a504c`, which differs only by a report
+change. The documentation head reviewed before this report was
+`934e23bcc9ac36cab24fe9ace2b6649ba7d8e83a`.
+
+Release blockers are the absent one-click isolated demo, the missing claim
+manifest and tagged claim tests, the inert probe edit action, and the lack of
+live rate limiting on unauthenticated API requests. Other findings cover the
+broken Atlas checkout, first-screen wording, route/metadata/404 structure, a
+pinned Rust builder image, and undersized phone touch targets.
+
+Fresh clean-checkout results: `npm test`, `npm run check`, `npm run build`,
+`npm run test:e2e -- --reporter=line`, the locked release build, npm audit, and
+the documented 100 req/s health smoke all passed. Fresh Lighthouse scores were
+95 performance and 100 for accessibility, best practices, and SEO. Local
+authenticated API rate limits returned 429 with `Retry-After`; an 80-request
+live unauthenticated burst returned 80 × 401 and no 429. No live project data
+was read or changed.
+
+---
+
+# Historical Capacity Sentinel QA handoff — PASS
 
 ## Final independent verification (supersedes the repair narrative below)
 
