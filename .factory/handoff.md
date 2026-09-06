@@ -1,68 +1,96 @@
-# Capacity Sentinel repair 5 handoff
+# Capacity Sentinel repair 6 handoff
 
-## Verification 6 result
+## Result
 
-**FAIL — the public product is unavailable.** Independent verification on
-2026-09-06 used implementation `90109876b120284fa7390a7342774a37c605b452`
-and documentation `3b0372c63895a5c62b7a55cad9f6d82f29473d01`. Fresh desktop
-and phone browser visits timed out, as did public HTTPS `/` and `/health`.
-The clean candidate passed `npm ci`, `npm test`, `npm run check`, `npm run
-build`, the full Playwright suite, every command in `.factory/claims.json`,
-and a locked release build. An isolated release runtime also passed health,
-restart, invalid-access, loopback-boundary, and 429/`Retry-After` checks.
+**PASS.** The public product is restored. The implementation is
+`700c520391446b89b7ca82570ccb5e9cb7cbf716`, and the deployed immutable image
+is `sha256:6e28640d4bb7d4118f2542cd67c4ae06d883ac26e940a53c0d163f796d16d1ed`.
+The final documentation commit is report-only relative to that implementation.
 
-There is one critical finding and zero untested declared claims. The local
-candidate has repaired the earlier product findings, but that does not restore
-the crash-looping public revision. See
-[`.factory/verification-6.md`](verification-6.md) for evidence and the
-required next action. This verification changed no product code, ARM state,
-revision, secrets, or product data.
+Fresh public checks returned HTTP 200 for `/` and `/health`. Health served:
 
-## Scoped restoration attempt
+```json
+{"build":"700c520391446b89b7ca82570ccb5e9cb7cbf716","status":"ok"}
+```
 
-Only the `sf-model-capacity-sentinel` Container App and its existing revisions
-were inspected through ARM. The existing latest revision,
-`sf-model-capacity-sentinel--recovery-safe`, was activated without creating a
-revision or manual suffix. The app was already in `Single` revision mode, so
-its required `latestRevision: 100` ingress target remained the sole traffic
-target. Azure Container Apps does not permit a named traffic target in this
-mode.
+## Cause and repair
 
-The app still preserves the required product topology: immutable image digest
-`sha256:afe74de9245868781bc8d91aa926a7495ba7111da1a71175367b25f769641d9b`,
-one Azure Files `/data` mount, no configured probes, and one minimum/maximum
-replica. No environment or secret values were read.
+The active `recovery-safe` replica failed before binding port 8080. Its log
+showed that `_sqlx_migrations` was absent and the first schema write waited 30
+seconds before SQLite returned code 5, `database is locked`. The earlier
+fallback database was also schema-empty, so no project rows were bypassed.
 
-## Result and verification
+Azure Files retained or could not service SQLite's default POSIX byte-range
+lock path. The smallest product change opens the same durable database through
+SQLite's built-in `unix-dotfile` VFS and limits the pool to one connection,
+matching the required one-replica topology. No database, key, token, volume,
+secret, or environment value was removed or copied.
 
-Local source verification passed after `npm ci`: `npm test` (2 frontend tests
-and 13 Rust tests) and `npm run build` (75.01 kB uncompressed frontend JS).
+The regression test first holds a conventional SQLite exclusive lock from a
+separate process and proves that the normal schema write fails with `database
+is locked`. It then opens the same file through the production connection,
+applies both migrations, verifies their successful records, closes the pool,
+and verifies that its filesystem lock was released.
 
-The requested restoration could not complete honestly. The sole active
-`recovery-safe` revision has one allocated replica but crash-loops during
-schema initialization before it opens the application port. Its ARM state is
-`Activating` / `healthState: None`; the app provisioning state remains
-`Failed`. Both public `HTTPS /` and `HTTPS /health` timed out with no HTTP
-response. No replacement or older revision was activated because the known
-older healthy revision does not retain the required durable `/data` mount and
-one-replica SQLite topology.
+## Deployment state
 
-The selected image maps to build
-`90109876b120284fa7390a7342774a37c605b452`, but it was not served. The
-pre-existing previous declarative revision image digest is
-`sha256:30b314916152b24efc1e1a4c92ca316461d3f8c754e23ed5f56f80a3c2c3abe1`;
-it is recorded as a rollback candidate only and was not activated.
+The image was built by ACR from the implementation commit with
+`BUILD_SHA=700c520391446b89b7ca82570ccb5e9cb7cbf716`. Deployment used one
+declarative Container App image update. No revision was created, copied,
+named, activated, or traffic-managed by hand.
 
-Full redacted evidence is in
-[`.factory/isolation-2026-09-05.md`](isolation-2026-09-05.md), copied to
-`/work/.evidence/isolation-report.md` for the factory.
+- ARM provisioning state: `Succeeded`
+- Revision mode: `Single`
+- Active revisions: exactly one, `sf-model-capacity-sentinel--0000008`
+- Revision state: `Healthy`, `RunningAtMaxScale`, one ready replica
+- Traffic: `latestRevision: true`, weight `100`
+- Scale: minimum 1, maximum 1
+- Storage: existing Azure Files volume retained at `/data`
+- Ingress, environment, and secrets: retained
+- Pre-update image digest: `sha256:afe74de9245868781bc8d91aa926a7495ba7111da1a71175367b25f769641d9b`
+- Earlier declarative image digest: `sha256:30b314916152b24efc1e1a4c92ca316461d3f8c754e23ed5f56f80a3c2c3abe1`
 
-## Guardrail and next step
+Both older digests remain in the product image repository. Neither is a safe
+rollback for the current Azure Files state because both use the failing
+default SQLite lock path. The deployed digest above is the recovery point.
 
-`README.md` now requires future normal releases to use one declarative
-Container App app update with an immutable image digest. It explicitly forbids
-hand-created/copy revisions, manual revision suffixes, and named revision
-traffic management. The next safe action is to repair the product's durable
-SQLite startup/storage condition while preserving `/data`, then rerun the
-non-mutating ARM and HTTPS checks. Do not create a further named revision as a
-workaround.
+## Verification
+
+A new clone of the pushed implementation commit passed:
+
+```text
+npm ci                                      PASS (0 vulnerabilities)
+npm test                                    PASS (2 Vitest, 14 Rust, 1 startup)
+npm run check                               PASS (Svelte and strict Clippy)
+npm run build                               PASS (dist/ produced)
+npm run test:e2e -- --reporter=line         PASS (16/16)
+npm run test:claims                         PASS (all 12 manifest entries)
+BUILD_SHA=<implementation> cargo build
+  --locked --release                        PASS
+```
+
+The ACR build also passed. Its frontend JavaScript and CSS hashes match a local
+production build made with the same SHA.
+
+Fresh desktop and iPhone browser contexts verified the job title, audience,
+one-click sample, persistent sample label, realistic open and recovered alerts,
+sample editing, reset, and separation from the real project. Demo use made no
+`/api/*` request and produced no console or page error. Live axe scans found no
+serious or critical issue at either size. Legal routes returned 200 and the
+designed unknown route returned the expected 404.
+
+A live invalid-access burst returned 41 HTTP 401 and 4 HTTP 429 responses; all
+429 responses had `Retry-After: 1`. A local stop/start check against the same
+data directory retained its created probe. Live Lighthouse measured 99
+performance, 100 accessibility, 100 best practices, and 100 SEO; LCP was 1.8
+seconds, CLS 0, and total blocking time 120 ms.
+
+Screenshots and Lighthouse JSON are under `/work/.evidence/`. The catalog
+description was copied to `/work/.evidence/catalog-description.txt`.
+
+## Known dependency
+
+Atlas remains a $39 one-time add-on for the 365-day comparison view. Checkout
+is honestly unavailable until the separate Sociobot billing operator registers
+the product. The free runner, demo, probes, alerts, and CSV export work without
+billing. Public offer metadata is in `/work/.evidence/billing-offer.json`.
