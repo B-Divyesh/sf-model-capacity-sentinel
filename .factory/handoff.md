@@ -1,16 +1,47 @@
 # Capacity Sentinel repair 6 handoff
 
+## Verification 7 update — 2026-09-06 UTC
+
+Independent verification **PASS**: zero findings and zero untested claims.
+The reviewed implementation is `700c520391446b89b7ca82570ccb5e9cb7cbf716`.
+The currently served, report-only documentation build is
+`784a4d372874016fcdce97271a18c7d79afcbd0a`; product source is identical
+between the two commits.
+
+The current live state supersedes the older revision details below:
+
+- ARM state is `Succeeded`; revision mode is `Single`.
+- The sole active generated revision is `sf-model-capacity-sentinel--0000009`.
+  It is `Healthy`, `RunningAtMaxScale`, and has one replica.
+- `latestRevision` receives 100% traffic.
+- The one-replica Azure Files `/data` mount remains present.
+- The active image digest is
+  `sha256:a0e31519ca5b577a152375cdfa1fe91e6e3cc1c6cf200f44f2f04f645946b4c7`.
+- `HTTPS /` and `/health` return 200; health serves the documentation SHA
+  above. The previous healthy compatible rollback digest is
+  `sha256:6e28640d4bb7d4118f2542cd67c4ae06d883ac26e940a53c0d163f796d16d1ed`.
+- The five prior manually named revisions (`sqlite-retry`, `sqlite-safe`,
+  `schema-safe`, `schema-diag`, and `recovery-safe`) remain inactive at zero
+  traffic. No new named or hand-managed revision was created.
+- Clean `npm test`, `npm run check`, `npm run build`, full Playwright,
+  `npm run test:claims`, and locked release build all pass. A 220-request live
+  invalid-access burst returned 49 `429` responses with `Retry-After: 1`.
+
+See `.factory/verification-7.md` for command logs, browser checks, claims, and
+the disposition of every earlier finding.
+
 ## Result
 
 **PASS.** The public product is restored. The implementation is
-`700c520391446b89b7ca82570ccb5e9cb7cbf716`, and the deployed immutable image
-is `sha256:6e28640d4bb7d4118f2542cd67c4ae06d883ac26e940a53c0d163f796d16d1ed`.
+`700c520391446b89b7ca82570ccb5e9cb7cbf716`; the active immutable image is
+`sha256:a0e31519ca5b577a152375cdfa1fe91e6e3cc1c6cf200f44f2f04f645946b4c7`.
 The final documentation commit is report-only relative to that implementation.
 
-Fresh public checks returned HTTP 200 for `/` and `/health`. Health served:
+Fresh public checks returned HTTP 200 for `/` and `/health`. Health now serves
+the report-only documentation SHA:
 
 ```json
-{"build":"700c520391446b89b7ca82570ccb5e9cb7cbf716","status":"ok"}
+{"build":"784a4d372874016fcdce97271a18c7d79afcbd0a","status":"ok"}
 ```
 
 ## Cause and repair
@@ -34,25 +65,25 @@ and verifies that its filesystem lock was released.
 
 ## Deployment state
 
-The image was built by ACR from the implementation commit with
-`BUILD_SHA=700c520391446b89b7ca82570ccb5e9cb7cbf716`. Deployment used one
-declarative Container App image update. No revision was created, copied,
-named, activated, or traffic-managed by hand.
+The initial recovery image was built by ACR from the implementation commit with
+`BUILD_SHA=700c520391446b89b7ca82570ccb5e9cb7cbf716`. The current active image
+was rebuilt from the later report-only documentation commit. Both deployments
+used one declarative Container App image update. No revision was copied,
+manually named, activated, or traffic-managed by hand.
 
 - ARM provisioning state: `Succeeded`
 - Revision mode: `Single`
-- Active revisions: exactly one, `sf-model-capacity-sentinel--0000008`
+- Active revisions: exactly one, `sf-model-capacity-sentinel--0000009`
 - Revision state: `Healthy`, `RunningAtMaxScale`, one ready replica
 - Traffic: `latestRevision: true`, weight `100`
 - Scale: minimum 1, maximum 1
 - Storage: existing Azure Files volume retained at `/data`
 - Ingress, environment, and secrets: retained
-- Pre-update image digest: `sha256:afe74de9245868781bc8d91aa926a7495ba7111da1a71175367b25f769641d9b`
-- Earlier declarative image digest: `sha256:30b314916152b24efc1e1a4c92ca316461d3f8c754e23ed5f56f80a3c2c3abe1`
+- Compatible rollback image digest: `sha256:6e28640d4bb7d4118f2542cd67c4ae06d883ac26e940a53c0d163f796d16d1ed`
+- Earlier default-lock image digest: `sha256:30b314916152b24efc1e1a4c92ca316461d3f8c754e23ed5f56f80a3c2c3abe1`
 
-Both older digests remain in the product image repository. Neither is a safe
-rollback for the current Azure Files state because both use the failing
-default SQLite lock path. The deployed digest above is the recovery point.
+The compatible rollback digest remains in the product image repository. The
+earlier default-lock digest is not safe for the current Azure Files state.
 
 ## Verification
 
