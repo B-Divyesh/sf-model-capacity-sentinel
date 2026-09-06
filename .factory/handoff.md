@@ -1,3 +1,45 @@
+# Capacity Sentinel review 3 handoff
+
+## Independent review 3
+
+**PASS — 0 findings and 0 untested public claims.** Review 3 verified
+implementation `7575d65e210ae685606cb1c7c72bb1239ce15bd7`; repository
+documentation is `6eecbb6bbaa4722a0f742bdb42bb1d7fa3b18ed3`; live `/health`
+identifies the report-only build `c4f64392faeac5837476ed0134077915621f9f95`.
+No product code or live deployment state changed.
+
+From a fresh checkout, `npm ci`, `npm test`, `npm run check`, `npm run build`,
+`npm run test:e2e -- --reporter=line`, `npm run test:claims`, the locked
+release build, and `npm audit --omit=dev` all passed. The claim runner executed
+all 28 declared commands and exited successfully.
+
+Fresh live desktop and phone checks confirmed the clear first screen, populated
+one-click sample, persistent demo label, edit/reset/start-for-real separation,
+offline demo reload, keyboard/accessibility baseline, legal routes, designed
+404, 44 px privacy email target, and rate limiting. A concurrent invalid-access
+burst returned 429 responses with `Retry-After: 1`, recovered after three
+seconds, and left health available. See `.factory/review-3.md` for evidence.
+
+## How to verify
+
+```bash
+npm ci
+npm test
+npm run check
+npm run build
+npm run test:e2e -- --reporter=line
+npm run test:claims
+BUILD_SHA=7575d65e210ae685606cb1c7c72bb1239ce15bd7 cargo build --locked --release
+npm audit --omit=dev
+```
+
+There are no known product gaps from this review. Atlas checkout remains
+honestly unavailable until Sociobot billing registration is complete; the free
+monitoring core and the tested license restore/verification behavior remain
+available.
+
+---
+
 # Capacity Sentinel repair 9 handoff
 
 ## Independent verification 9
