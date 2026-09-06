@@ -991,6 +991,55 @@ mod integration_tests {
         assert!(stats["p95_latency_ms"].as_i64().unwrap() >= 25);
     }
 
+    // @claim:rolling-20-observations
+    #[tokio::test]
+    async fn claim_dashboard_metrics_use_only_the_latest_20_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let id = create_probe(&app, &state, probe_input("http://127.0.0.1:9/chat")).await;
+        let now = Utc::now();
+
+        for index in 0..=20 {
+            let is_oldest = index == 0;
+            let started_at = now - chrono::Duration::minutes(21 - index);
+            sqlx::query("INSERT INTO observations(id,probe_id,started_at,latency_ms,http_status,outcome,error_class,detail,input_tokens,output_tokens,invariant_valid) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+                .bind(format!("rolling-observation-{index:02}"))
+                .bind(&id)
+                .bind(started_at.to_rfc3339())
+                .bind(if is_oldest { 9_000_i64 } else { 100_i64 + index })
+                .bind(if is_oldest { 429_i64 } else { 200_i64 })
+                .bind(if is_oldest { "failure" } else { "healthy" })
+                .bind(if is_oldest { Some("capacity") } else { None::<&str> })
+                .bind(if is_oldest { "HTTP 429" } else { "All required fields present" })
+                .bind(3_i64)
+                .bind(5_i64)
+                .bind(if is_oldest { 0_i64 } else { 1_i64 })
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+
+        let response = app
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let summary: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap())
+                .unwrap();
+        let stats = &summary["probes"][0]["stats"];
+
+        assert_eq!(stats["sample_count"], 20);
+        assert_eq!(stats["availability_percent"], 100.0);
+        assert_eq!(stats["p95_latency_ms"], 119);
+        assert_eq!(
+            summary["probes"][0]["last_observation"]["id"],
+            "rolling-observation-20"
+        );
+        assert_eq!(summary["observations"].as_array().unwrap().len(), 21);
+    }
+
     // @claim:atlas-365day-window
     #[tokio::test]
     async fn claim_atlas_comparison_only_receives_the_latest_365_days_of_observations() {

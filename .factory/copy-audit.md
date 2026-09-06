@@ -34,6 +34,9 @@ they are part of the first-use language. No listed sentence exceeds 22 words.
 | Atlas adds the extended comparison view. | 6 | — |
 | Checkout will be available after Sociobot registers this product. | 9 | — |
 | No subscription. | 2 | — |
+| Synthetic monitoring for model API operators. | 6 | — |
+| Built by Param Factory. | 4 | — |
+| Build [identifier]. | 2 | — |
 
 ## Terminology
 

@@ -105,6 +105,20 @@
     "sandbox": "temporary SQLite runner with delayed successful local endpoint responses"
   },
   {
+    "id": "rolling-20-observations",
+    "claim": "Calculate dashboard availability and p95 from the latest 20 observations per probe",
+    "where": "dashboard availability metric",
+    "test": "cargo test claim_dashboard_metrics_use_only_the_latest_20_observations",
+    "sandbox": "temporary SQLite runner with 21 observations; the oldest failure and latency outlier must not affect returned metrics"
+  },
+  {
+    "id": "session-only-access-code",
+    "claim": "Keep the project access code only for the current browser session",
+    "where": "project access screen",
+    "test": "npm run test:e2e -- --grep @claim:session-only-access-code",
+    "sandbox": "two fresh browser contexts; open a project in the first, inspect browser storage, then confirm the second starts locked"
+  },
+  {
     "id": "failure-classification",
     "claim": "Classify invalid JSON, missing required fields, timeout, network, and upstream failures",
     "where": "probe results and terms",

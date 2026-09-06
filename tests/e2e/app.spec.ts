@@ -201,14 +201,63 @@ test("@claim:route-structure gives legal routes titles and a designed 404 page",
   await expect(
     page.getByRole("heading", { level: 1, name: "Read the privacy policy" }),
   ).toBeVisible();
-  await page.getByRole("link", { name: "Terms" }).click();
+  const appFooter = page.locator("#app > footer");
+  await expect(appFooter).toContainText("Built by Param Factory");
+  const emailTarget = await page.getByRole("link", { name: "privacy@sociobot.in" }).boundingBox();
+  expect(emailTarget).not.toBeNull();
+  expect(emailTarget!.height).toBeGreaterThanOrEqual(44);
+  await appFooter.getByRole("link", { name: "Terms" }).click();
   await expect(page).toHaveTitle("Terms — Capacity Sentinel");
   await expect(
     page.getByRole("heading", { level: 1, name: "Read the terms of use" }),
   ).toBeFocused();
-  const missing = await page.request.get("/a-page-that-does-not-exist");
-  expect(missing.status()).toBe(404);
-  expect(await missing.text()).toContain("This page was not found");
+  const missing = await page.goto("/a-page-that-does-not-exist");
+  expect(missing?.status()).toBe(404);
+  await expect(page).toHaveTitle("Page not found — Capacity Sentinel");
+  await expect(page.getByRole("heading", { level: 1, name: "This page was not found" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Skip to main content" })).toHaveAttribute("href", "#main");
+  const header = page.locator("body > header");
+  await expect(header.getByRole("link", { name: "Dashboard" })).toHaveAttribute("href", "/#observations");
+  const footer = page.locator("body > footer");
+  await expect(footer.getByRole("link", { name: "Privacy" })).toHaveAttribute("href", "/privacy");
+  await expect(footer.getByRole("link", { name: "Terms" })).toHaveAttribute("href", "/terms");
+  await expect(footer).toContainText("Built by Param Factory");
+  await expect(footer).toContainText(/Build (local|[a-f0-9]{7,40})/);
+});
+
+test("@claim:session-only-access-code forgets the project code in a fresh browser session", async ({
+  browser,
+}) => {
+  const firstSession = await browser.newContext();
+  const firstPage = await firstSession.newPage();
+  await firstPage.goto("/");
+  await firstPage.getByLabel("Project access code").fill("e2e-access-token-that-is-at-least-24-chars");
+  await firstPage.getByRole("button", { name: "Open project" }).click();
+  await expect(firstPage.getByRole("heading", { name: "No probes yet" })).toBeVisible();
+  expect(
+    await firstPage.evaluate(() => sessionStorage.getItem("capacity-sentinel-access")),
+  ).toBe("e2e-access-token-that-is-at-least-24-chars");
+  expect(
+    await firstPage.evaluate(() => localStorage.getItem("capacity-sentinel-access")),
+  ).toBeNull();
+  await firstSession.close();
+
+  const freshSession = await browser.newContext();
+  const freshPage = await freshSession.newPage();
+  const apiRequests: string[] = [];
+  freshPage.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/api/")) apiRequests.push(request.url());
+  });
+  await freshPage.goto("/");
+  await expect(freshPage.getByRole("heading", { name: "Open this project" })).toBeVisible();
+  expect(
+    await freshPage.evaluate(() => sessionStorage.getItem("capacity-sentinel-access")),
+  ).toBeNull();
+  expect(
+    await freshPage.evaluate(() => localStorage.getItem("capacity-sentinel-access")),
+  ).toBeNull();
+  expect(apiRequests).toEqual([]);
+  await freshSession.close();
 });
 
 test("@claim:access-code-rate-limit rejects repeated invalid access codes with retry guidance", async ({
