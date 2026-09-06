@@ -85,6 +85,23 @@ identity.
 | `SENTINEL_MASTER_KEY` | generated local key | External master-key material |
 | `SENTINEL_ACCESS_TOKEN` | generated local token | Project access code |
 
+### Azure Container Apps deployment guard
+
+Capacity Sentinel uses a single-replica SQLite topology. The factory deployment
+definition must keep `activeRevisionsMode: Single`, one Azure Files-backed
+`/data` mount, `minReplicas: 1`, `maxReplicas: 1`, and Azure's single-mode
+`latestRevision: 100` ingress rule together in one declarative app update.
+
+Do not hand-create or hand-copy revisions, do not pass `--revision-suffix`,
+and do not edit named revision traffic targets. A normal release updates the
+declarative Container App definition with the selected immutable image digest;
+Azure then creates the generated revision and makes it the single active
+revision. In single-revision mode Azure represents all traffic as
+`latestRevision: 100`, rather than permitting a named-revision traffic rule.
+Before and after a release, verify the app provisioning state, exactly one
+active/healthy revision, the immutable image digest, and public `HTTPS /` plus
+`/health`. Never print application secret values while performing those checks.
+
 ## Atlas add-on
 
 Atlas is a $39 one-time paid add-on for the 365-day comparison view. The free
