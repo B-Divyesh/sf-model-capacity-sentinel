@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { api, ApiError, setAccessToken } from './api';
   import type { Probe, ProbeInput, Summary } from './types';
-  import { consumeLicenseFromUrl, storeToken, storedToken, verifyLicense, type LicenseState } from './license';
+  import { cachedLicense, consumeLicenseFromUrl, storeToken, storedToken, verifyLicense, type LicenseState } from './license';
   import { loadDemo, removeDemoProbe, resetDemo, runDemoProbe, saveDemo, updateDemoProbe } from './demo';
 
   const empty: Summary = { probes: [], alerts: [], observations: [] };
@@ -40,10 +40,12 @@
   onMount(() => {
     const saved = sessionStorage.getItem('capacity-sentinel-access');
     if (saved) { accessCode = saved; setAccessToken(saved); }
-    if (!demoMode) {
-      const incoming = consumeLicenseFromUrl();
-      const token = incoming || storedToken();
-      if (token) { license = { ...license, checking: true, token }; verifyLicense(token).then((value) => license = value); }
+    const incoming = demoMode ? '' : consumeLicenseFromUrl();
+    const token = incoming || storedToken();
+    if (token) {
+      const cached = cachedLicense(token);
+      if (demoMode) license = cached || license;
+      else { license = { ...license, checking: true, token }; verifyLicense(token).then((value) => license = value); }
     }
     enterRoute(path, false);
     const online = () => { offline = false; if (accessCode && !demoMode) load(); };

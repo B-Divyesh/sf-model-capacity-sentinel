@@ -526,7 +526,7 @@ async fn shutdown() {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::{models::ProbeInput, routes::resolve_public_endpoint};
+    use crate::routes::resolve_public_endpoint;
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -536,6 +536,10 @@ mod integration_tests {
     use serde_json::{json, Value};
     use std::{
         process::{Command, Stdio},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc as StdArc, Mutex,
+        },
         thread,
         time::Instant,
     };
@@ -683,6 +687,59 @@ mod integration_tests {
             .unwrap()
     }
 
+    fn probe_input(endpoint: impl Into<String>) -> Value {
+        json!({
+            "name": "Capacity canary",
+            "provider": "Test provider",
+            "endpoint_url": endpoint.into(),
+            "model": "test-model",
+            "api_key": "test-api-key",
+            "prompt": "Return a synthetic JSON status",
+            "required_fields": ["status"],
+            "interval_minutes": 5,
+            "timeout_ms": 2000,
+            "latency_slo_ms": 1000,
+            "availability_slo_percent": 99,
+            "max_output_tokens": 32,
+            "daily_token_cap": 1000,
+            "enabled": true
+        })
+    }
+
+    async fn create_probe(
+        app: &Router,
+        state: &AppState,
+        input: Value,
+    ) -> String {
+        let response = app
+            .clone()
+            .oneshot(json_request("POST", "/api/probes", input))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        sqlx::query_scalar("SELECT id FROM probes ORDER BY created_at DESC LIMIT 1")
+            .fetch_one(&state.db)
+            .await
+            .unwrap()
+    }
+
+    async fn run_probe(app: &Router, id: &str) -> Value {
+        let response = app
+            .clone()
+            .oneshot(json_request("POST", &format!("/api/probes/{id}/run"), json!({})))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap()
+    }
+
+    fn successful_completion(content: &str) -> Json<Value> {
+        Json(json!({
+            "choices": [{"message": {"content": content}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 5}
+        }))
+    }
+
     // @claim:encrypted-storage-and-classification
     #[tokio::test]
     async fn claim_encrypted_storage_and_failure_attribution() {
@@ -827,27 +884,435 @@ mod integration_tests {
                 .status(),
             StatusCode::UNAUTHORIZED
         );
-        let input = ProbeInput {
-            name: "x".into(),
-            provider: "x".into(),
-            endpoint_url: "http://127.0.0.1:8080/chat".into(),
-            model: "x".into(),
-            api_key: "x".into(),
-            prompt: "synthetic".into(),
-            required_fields: vec![],
-            interval_minutes: 5,
-            timeout_ms: 1000,
-            latency_slo_ms: 100,
-            availability_slo_percent: 99.0,
-            max_output_tokens: 1,
-            daily_token_cap: 1,
-            enabled: true,
-        };
-        assert!(
-            resolve_public_endpoint(&url::Url::parse(&input.endpoint_url).unwrap(), false)
-                .await
-                .is_err()
+        for endpoint in [
+            "http://127.0.0.1:8080/chat",
+            "http://10.0.0.1/chat",
+            "http://169.254.1.1/chat",
+            "http://192.168.1.1/chat",
+            "http://[::1]/chat",
+            "http://[fe80::1]/chat",
+        ] {
+            assert!(
+                resolve_public_endpoint(&url::Url::parse(endpoint).unwrap(), false)
+                    .await
+                    .is_err(),
+                "{endpoint} must be rejected before a probe can be saved"
+            );
+        }
+    }
+
+    // @claim:scheduled-probes
+    #[tokio::test]
+    async fn claim_scheduled_probes_create_observations_for_enabled_probes() {
+        let mock = Router::new().route(
+            "/chat",
+            post(|| async { successful_completion(r#"{"status":"ok"}"#) }),
         );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let id = create_probe(&app, &state, probe_input(format!("http://{address}/chat"))).await;
+        let scheduler_task = tokio::spawn(scheduler(state.clone()));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM observations WHERE probe_id=?",
+                )
+                .bind(&id)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+                if count == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("an enabled probe should run on the scheduler without a manual request");
+        scheduler_task.abort();
+
+        let outcome: String = sqlx::query_scalar(
+            "SELECT outcome FROM observations WHERE probe_id=? LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(outcome, "healthy");
+    }
+
+    // @claim:real-monitoring-metrics
+    #[tokio::test]
+    async fn claim_real_monitoring_metrics_use_successful_endpoint_responses() {
+        let mock = Router::new().route(
+            "/chat",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                successful_completion(r#"{"status":"ok"}"#)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let id = create_probe(&app, &state, probe_input(format!("http://{address}/chat"))).await;
+        for _ in 0..3 {
+            let observation = run_probe(&app, &id).await;
+            assert_eq!(observation["outcome"], "healthy");
+            assert!(observation["latency_ms"].as_i64().unwrap() >= 25);
+        }
+        let response = app
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        let summary: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        let stats = &summary["probes"][0]["stats"];
+        assert_eq!(stats["sample_count"], 3);
+        assert_eq!(stats["availability_percent"], 100.0);
+        assert!(stats["p95_latency_ms"].as_i64().unwrap() >= 25);
+    }
+
+    // @claim:failure-classification
+    #[tokio::test]
+    async fn claim_failure_classification_reports_shape_timeout_network_and_upstream_errors() {
+        let mock = Router::new()
+            .route(
+                "/invalid-json",
+                post(|| async { successful_completion("not JSON") }),
+            )
+            .route(
+                "/missing-field",
+                post(|| async { successful_completion(r#"{"other":"value"}"#) }),
+            )
+            .route(
+                "/upstream",
+                post(|| async {
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"unavailable"})))
+                }),
+            )
+            .route(
+                "/slow",
+                post(|| async {
+                    tokio::time::sleep(Duration::from_millis(1_100)).await;
+                    successful_completion(r#"{"status":"late"}"#)
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let cases = [
+            ("invalid-json", "invalid_json"),
+            ("missing-field", "invariant"),
+            ("upstream", "upstream"),
+            ("slow", "timeout"),
+        ];
+        for (path, expected) in cases {
+            let mut input = probe_input(format!("http://{address}/{path}"));
+            if path == "slow" {
+                input["timeout_ms"] = json!(1000);
+            }
+            let id = create_probe(&app, &state, input).await;
+            let observation = run_probe(&app, &id).await;
+            assert_eq!(observation["error_class"], expected);
+        }
+
+        let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let closed_address = closed.local_addr().unwrap();
+        drop(closed);
+        let id = create_probe(
+            &app,
+            &state,
+            probe_input(format!("http://{closed_address}/unreachable")),
+        )
+        .await;
+        let observation = run_probe(&app, &id).await;
+        assert_eq!(observation["error_class"], "network");
+    }
+
+    // @claim:attributed-alert-recovery
+    #[tokio::test]
+    async fn claim_attributed_alerts_open_after_failures_and_resolve_after_recovery() {
+        let healthy = StdArc::new(AtomicBool::new(false));
+        let mock = Router::new().route(
+            "/chat",
+            post({
+                let healthy = healthy.clone();
+                move || {
+                    let healthy = healthy.clone();
+                    async move {
+                        if healthy.load(Ordering::SeqCst) {
+                            successful_completion(r#"{"status":"ok"}"#).into_response()
+                        } else {
+                            (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"capacity"})))
+                                .into_response()
+                        }
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let mut input = probe_input(format!("http://{address}/chat"));
+        input["provider"] = json!("Northern provider");
+        input["model"] = json!("model-amber");
+        let id = create_probe(&app, &state, input).await;
+        run_probe(&app, &id).await;
+        run_probe(&app, &id).await;
+        let response = app
+            .clone()
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        let opened: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        assert_eq!(opened["alerts"][0]["status"], "open");
+        let message = opened["alerts"][0]["message"].as_str().unwrap();
+        assert!(message.contains("Northern provider/model-amber"));
+        assert!(message.contains("capacity"));
+
+        healthy.store(true, Ordering::SeqCst);
+        let recovered = run_probe(&app, &id).await;
+        assert_eq!(recovered["outcome"], "healthy");
+        let response = app
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        let summary: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        assert_eq!(summary["alerts"][0]["status"], "resolved");
+        assert!(summary["alerts"][0]["resolved_at"].is_string());
+    }
+
+    // @claim:edit-preserves-history
+    #[tokio::test]
+    async fn claim_editing_a_probe_keeps_its_existing_observations() {
+        let mock = Router::new().route(
+            "/chat",
+            post(|| async { successful_completion(r#"{"status":"ok"}"#) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let input = probe_input(format!("http://{address}/chat"));
+        let id = create_probe(&app, &state, input.clone()).await;
+        run_probe(&app, &id).await;
+        run_probe(&app, &id).await;
+
+        let mut changed = input;
+        changed["model"] = json!("test-model-revised");
+        changed["api_key"] = json!("");
+        changed["prompt"] = json!("");
+        let response = app
+            .clone()
+            .oneshot(json_request("PUT", &format!("/api/probes/{id}"), changed))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .oneshot(authenticated_request(
+                "GET",
+                &format!("/api/observations?probe_id={id}"),
+            ))
+            .await
+            .unwrap();
+        let observations: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        assert_eq!(observations.as_array().unwrap().len(), 2);
+        assert!(observations
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|observation| observation["probe_id"] == id));
+        let model: String = sqlx::query_scalar("SELECT model FROM probes WHERE id=?")
+            .bind(&id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(model, "test-model-revised");
+    }
+
+    // @claim:token-limits
+    #[tokio::test]
+    async fn claim_token_limits_send_the_output_limit_and_block_the_daily_cap() {
+        let requests = StdArc::new(Mutex::new(Vec::<Value>::new()));
+        let mock = Router::new().route(
+            "/chat",
+            post({
+                let requests = requests.clone();
+                move |Json(body): Json<Value>| {
+                    let requests = requests.clone();
+                    async move {
+                        requests.lock().unwrap().push(body);
+                        successful_completion(r#"{"status":"ok"}"#)
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let mut input = probe_input(format!("http://{address}/chat"));
+        input["max_output_tokens"] = json!(7);
+        input["daily_token_cap"] = json!(20);
+        let id = create_probe(&app, &state, input).await;
+        let first = run_probe(&app, &id).await;
+        assert_eq!(first["outcome"], "healthy");
+        let second = run_probe(&app, &id).await;
+        assert_eq!(second["error_class"], "cost_cap");
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(requests.lock().unwrap()[0]["max_tokens"], 7);
+    }
+
+    // @claim:probe-deletion
+    #[tokio::test]
+    async fn claim_deleting_a_probe_removes_its_settings_observations_and_alerts() {
+        let mock = Router::new().route(
+            "/chat",
+            post(|| async { (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"capacity"}))) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let id = create_probe(&app, &state, probe_input(format!("http://{address}/chat"))).await;
+        run_probe(&app, &id).await;
+        run_probe(&app, &id).await;
+        let response = app
+            .clone()
+            .oneshot(authenticated_request("DELETE", &format!("/api/probes/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let response = app
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        let summary: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        assert_eq!(summary["probes"], json!([]));
+        assert_eq!(summary["observations"], json!([]));
+        assert_eq!(summary["alerts"], json!([]));
+    }
+
+    // @claim:api-access-coverage
+    #[tokio::test]
+    async fn claim_every_project_api_route_requires_the_access_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(temp.path()).await, temp.path());
+        for (method, uri, body) in [
+            ("GET", "/api/summary", Body::empty()),
+            ("POST", "/api/probes", Body::from("{}")),
+            ("PUT", "/api/probes/missing", Body::from("{}")),
+            ("DELETE", "/api/probes/missing", Body::empty()),
+            ("POST", "/api/probes/missing/run", Body::from("{}")),
+            ("GET", "/api/observations", Body::empty()),
+            ("GET", "/api/export.csv", Body::empty()),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer wrong-access-code")
+                        .header("x-forwarded-for", "198.51.100.211")
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method} {uri}");
+            assert_eq!(response.headers().get(header::WWW_AUTHENTICATE).unwrap(), "Bearer");
+        }
+    }
+
+    // @claim:private-canary-boundary
+    #[tokio::test]
+    async fn claim_private_canary_data_reaches_only_the_configured_endpoint_and_is_not_retained() {
+        let received = StdArc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let mock = Router::new().route(
+            "/chat",
+            post({
+                let received = received.clone();
+                move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                    let received = received.clone();
+                    async move {
+                        received.lock().unwrap().push((
+                            headers
+                                .get(header::AUTHORIZATION)
+                                .unwrap()
+                                .to_str()
+                                .unwrap()
+                                .to_owned(),
+                            body,
+                        ));
+                        successful_completion(r#"{"status":"provider-private-answer"}"#)
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, mock).await.unwrap() });
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let mut input = probe_input(format!("http://{address}/chat"));
+        input["api_key"] = json!("private-api-key");
+        input["prompt"] = json!("Synthetic private canary text");
+        let id = create_probe(&app, &state, input).await;
+        assert_eq!(run_probe(&app, &id).await["outcome"], "healthy");
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].0, "Bearer private-api-key");
+        assert_eq!(received[0].1["messages"][0]["content"], "Synthetic private canary text");
+        drop(received);
+
+        let response = app
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        let serialized = String::from_utf8(
+            to_bytes(response.into_body(), 100_000).await.unwrap().to_vec(),
+        )
+        .unwrap();
+        for private_value in [
+            "private-api-key",
+            "Synthetic private canary text",
+            "provider-private-answer",
+        ] {
+            assert!(
+                !serialized.contains(private_value),
+                "operational records must not return {private_value}"
+            );
+        }
     }
 
     #[tokio::test]

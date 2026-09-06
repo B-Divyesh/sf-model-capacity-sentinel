@@ -64,10 +64,10 @@
   },
   {
     "id": "public-endpoint-safety",
-    "claim": "Reject private and loopback probe targets",
+    "claim": "Reject private, loopback, and link-local probe targets",
     "where": "probe endpoint help",
     "test": "cargo test claim_public_endpoint_safety",
-    "sandbox": "temporary runner validates loopback endpoint input"
+    "sandbox": "temporary runner validates private IPv4 plus IPv4 and IPv6 loopback and link-local endpoint input"
   },
   {
     "id": "local-persistence-health",
@@ -77,10 +77,94 @@
     "sandbox": "clean process environment and temporary working directory"
   },
   {
-    "id": "license-restore",
-    "claim": "Store a returned or pasted Atlas license in this browser before verification",
+    "id": "atlas-license-lifecycle",
+    "claim": "Store returned or pasted Atlas licenses, verify them once per day, and lock invalid or revoked licenses",
     "where": "Atlas restore dialog",
-    "test": "npx vitest run -t @claim:license-restore",
-    "sandbox": "JSDOM localStorage and history fixture"
+    "test": "npx vitest run -t @claim:atlas-license-lifecycle",
+    "sandbox": "JSDOM localStorage, URL handoff, and recorded valid, revoked, and offline verification fixtures"
+  },
+  {
+    "id": "scheduled-probes",
+    "claim": "Run enabled probes on schedule without a manual request",
+    "where": "probe schedule control and README",
+    "test": "cargo test claim_scheduled_probes_create_observations_for_enabled_probes",
+    "sandbox": "temporary SQLite runner with an enabled probe and local OpenAI-compatible fixture"
+  },
+  {
+    "id": "real-monitoring-metrics",
+    "claim": "Measure availability, elapsed latency, and rolling p95 from successful endpoint responses",
+    "where": "dashboard metrics and README",
+    "test": "cargo test claim_real_monitoring_metrics_use_successful_endpoint_responses",
+    "sandbox": "temporary SQLite runner with delayed successful local endpoint responses"
+  },
+  {
+    "id": "failure-classification",
+    "claim": "Classify invalid JSON, missing required fields, timeout, network, and upstream failures",
+    "where": "probe results and terms",
+    "test": "cargo test claim_failure_classification_reports_shape_timeout_network_and_upstream_errors",
+    "sandbox": "temporary runner with local invalid, incomplete, unavailable, slow, and closed-port endpoint fixtures"
+  },
+  {
+    "id": "attributed-alert-recovery",
+    "claim": "Open provider/model-attributed alerts after repeated failures and resolve them after recovery",
+    "where": "How it works and alert panel",
+    "test": "cargo test claim_attributed_alerts_open_after_failures_and_resolve_after_recovery",
+    "sandbox": "temporary runner with a local endpoint that changes from HTTP 429 to a valid response"
+  },
+  {
+    "id": "edit-preserves-history",
+    "claim": "Keep a probe's observations when its settings are edited",
+    "where": "probe edit dialog",
+    "test": "cargo test claim_editing_a_probe_keeps_its_existing_observations",
+    "sandbox": "temporary runner creates observations, edits the model, then reads the same probe history"
+  },
+  {
+    "id": "token-limits",
+    "claim": "Send the configured maximum output tokens and stop a probe at its daily token cap",
+    "where": "probe schedule and objectives",
+    "test": "cargo test claim_token_limits_send_the_output_limit_and_block_the_daily_cap",
+    "sandbox": "temporary runner captures a local endpoint request then verifies the second run is cost-capped"
+  },
+  {
+    "id": "probe-deletion",
+    "claim": "Delete a probe together with its local observations and alerts",
+    "where": "probe removal control and privacy policy",
+    "test": "cargo test claim_deleting_a_probe_removes_its_settings_observations_and_alerts",
+    "sandbox": "temporary runner creates a probe, observations, and alert, then checks the post-delete summary"
+  },
+  {
+    "id": "api-access-coverage",
+    "claim": "Require the project access code for every project API route",
+    "where": "README",
+    "test": "cargo test claim_every_project_api_route_requires_the_access_code",
+    "sandbox": "temporary runner sends an invalid access code to every supported project API route"
+  },
+  {
+    "id": "private-canary-boundary",
+    "claim": "Send a synthetic prompt and credential to its configured endpoint without retaining either or the response content",
+    "where": "privacy policy",
+    "test": "cargo test claim_private_canary_data_reaches_only_the_configured_endpoint_and_is_not_retained",
+    "sandbox": "temporary runner and local endpoint capture the request, then inspect returned operational records"
+  },
+  {
+    "id": "durable-project-state",
+    "claim": "Keep project state in durable SQLite storage across a runner restart",
+    "where": "README",
+    "test": "cargo test claim_durable_project_state_survives_a_runner_restart",
+    "sandbox": "launch the compiled runner twice against one temporary data directory and read the saved probe"
+  },
+  {
+    "id": "nonroot-runner",
+    "claim": "Start the runner without root when its data directory is writable",
+    "where": "container deployment documentation",
+    "test": "cargo test claim_nonroot_runner_starts_with_a_writable_data_directory",
+    "sandbox": "launch the compiled runner as UID 65532 against a writable temporary data directory"
+  },
+  {
+    "id": "atlas-comparison-view",
+    "claim": "Show the licensed Atlas provider comparison with observations, availability, and p95 latency",
+    "where": "Atlas add-on section",
+    "test": "npm run test:e2e -- --grep @claim:atlas-comparison-view",
+    "sandbox": "fresh browser at /demo with a browser-local valid license verdict and shipped sample observations"
   }
 ]

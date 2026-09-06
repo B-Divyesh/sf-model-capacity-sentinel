@@ -108,6 +108,30 @@ test("@claim:csv-export downloads every sample observation as CSV", async ({
   expect(content).toContain("North America chat availability");
 });
 
+test("@claim:atlas-comparison-view shows the licensed 365-day comparison on the sample data", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("sb_license:model-capacity-sentinel", "fixture-license");
+    localStorage.setItem(
+      "sb_license:model-capacity-sentinel:verdict",
+      JSON.stringify({ valid: true, at: Date.now(), token: "fixture-license" }),
+    );
+  });
+  await page.goto("/demo");
+  await expect(
+    page.getByRole("heading", { name: "Compare providers over time" }),
+  ).toBeVisible();
+  const comparison = page.locator(".atlas-table");
+  await expect(comparison).toContainText("Example AI");
+  await expect(comparison).toContainText("chat-pro-2026");
+  await expect(comparison).toContainText("eu-json-2026");
+  await expect(comparison).toContainText("Availability");
+  await expect(comparison).toContainText("p95 latency");
+  await expect(page.getByText("$39", { exact: true })).toBeVisible();
+  await expect(page.getByText("One-time", { exact: true })).toBeVisible();
+});
+
 test("@claim:accessible-mobile-dashboard is usable by keyboard and has no serious axe issues", async ({
   page,
 }) => {
@@ -179,4 +203,24 @@ test("@claim:access-code-rate-limit rejects repeated invalid access codes with r
   expect(
     responses.filter((response) => response.status() === 401).length,
   ).toBeGreaterThan(0);
+});
+
+test("the demo reloads offline after its first controlled visit and its service worker accepts an update check", async ({
+  browser,
+}) => {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto("/demo");
+  await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.ready;
+    await registration.update();
+  });
+  await page.reload();
+  await context.setOffline(true);
+  await page.reload();
+  await expect(page).toHaveTitle("Demo — Capacity Sentinel");
+  await expect(
+    page.getByText("Demo — sample data, nothing is saved"),
+  ).toBeVisible();
+  await context.close();
 });
