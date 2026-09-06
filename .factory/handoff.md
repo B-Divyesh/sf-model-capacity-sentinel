@@ -1,5 +1,23 @@
 # Capacity Sentinel repair 5 handoff
 
+## Verification 6 result
+
+**FAIL — the public product is unavailable.** Independent verification on
+2026-09-06 used implementation `90109876b120284fa7390a7342774a37c605b452`
+and documentation `3b0372c63895a5c62b7a55cad9f6d82f29473d01`. Fresh desktop
+and phone browser visits timed out, as did public HTTPS `/` and `/health`.
+The clean candidate passed `npm ci`, `npm test`, `npm run check`, `npm run
+build`, the full Playwright suite, every command in `.factory/claims.json`,
+and a locked release build. An isolated release runtime also passed health,
+restart, invalid-access, loopback-boundary, and 429/`Retry-After` checks.
+
+There is one critical finding and zero untested declared claims. The local
+candidate has repaired the earlier product findings, but that does not restore
+the crash-looping public revision. See
+[`.factory/verification-6.md`](verification-6.md) for evidence and the
+required next action. This verification changed no product code, ARM state,
+revision, secrets, or product data.
+
 ## Scoped restoration attempt
 
 Only the `sf-model-capacity-sentinel` Container App and its existing revisions
