@@ -14,10 +14,7 @@ use axum::{
     Json, Router,
 };
 use crypto::{key_source, SecretBox};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
-    SqlitePool,
-};
+use sqlx::{sqlite::{SqliteConnectOptions, SqlitePoolOptions}, SqlitePool};
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -68,10 +65,11 @@ async fn main() -> anyhow::Result<()> {
     let db_url = format!("sqlite://{}", data_dir.join("sentinel.db").display());
     let opts = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)
-        .journal_mode(SqliteJournalMode::Wal)
-        // Azure Files can retain a SQLite lock briefly while a one-replica
-        // revision is replaced. Wait for that hand-off instead of treating it
-        // as a fatal startup failure.
+        // A previous one-replica revision can retain a normal SQLite lock
+        // briefly while the durable Azure Files mount is handed over. Wait
+        // for that hand-off instead of failing startup. Do not issue a
+        // `PRAGMA journal_mode` here: switching journal modes requires an
+        // exclusive lock that SQLite cannot wait for with busy_timeout.
         .busy_timeout(Duration::from_secs(30))
         .foreign_keys(true);
     let db = SqlitePoolOptions::new()
@@ -446,7 +444,6 @@ mod integration_tests {
             SqliteConnectOptions::from_str(&format!("sqlite://{}", dir.join("test.db").display()))
                 .unwrap()
                 .create_if_missing(true)
-                .journal_mode(SqliteJournalMode::Wal)
                 .foreign_keys(true);
         let db = SqlitePoolOptions::new()
             .max_connections(1)
