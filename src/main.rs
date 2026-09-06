@@ -69,6 +69,10 @@ async fn main() -> anyhow::Result<()> {
     let opts = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
+        // Azure Files can retain a SQLite lock briefly while a one-replica
+        // revision is replaced. Wait for that hand-off instead of treating it
+        // as a fatal startup failure.
+        .busy_timeout(Duration::from_secs(30))
         .foreign_keys(true);
     let db = SqlitePoolOptions::new()
         .max_connections(5)
