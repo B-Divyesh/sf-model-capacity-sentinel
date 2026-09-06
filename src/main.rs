@@ -64,21 +64,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::var("DATA_DIR").unwrap_or_else(|_| default_data_dir.into()),
     );
     std::fs::create_dir_all(&data_dir)?;
-    let db_url = format!("sqlite://{}", data_dir.join("sentinel.db").display());
-    let opts = SqliteConnectOptions::from_str(&db_url)?
-        .create_if_missing(true)
-        // A previous one-replica revision can retain a normal SQLite lock
-        // briefly while the durable Azure Files mount is handed over. Wait
-        // for that hand-off instead of failing startup. Do not issue a
-        // `PRAGMA journal_mode` here: switching journal modes requires an
-        // exclusive lock that SQLite cannot wait for with busy_timeout.
-        .busy_timeout(Duration::from_secs(30))
-        .foreign_keys(true);
-    let db = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(opts)
-        .await?;
-    migrate_database(&db).await?;
+    let (db, database_source) = open_database(&data_dir).await?;
     let master_key_source = key_source(&data_dir);
     let secrets = SecretBox::from_data_dir(&data_dir)?;
     migrate_plaintext_canaries(&db, &secrets).await?;
@@ -114,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
             "default"
         },
         port_source = if port_supplied { "supplied" } else { "default" },
+        database_source,
         master_key_source,
         access_token_source,
         build = routes::build_identity(),
@@ -127,6 +114,57 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown())
     .await?;
     Ok(())
+}
+
+async fn open_database(data_dir: &Path) -> anyhow::Result<(SqlitePool, &'static str)> {
+    let primary_path = data_dir.join("sentinel.db");
+    let recovery_path = data_dir.join("sentinel-recovery.db");
+    if recovery_path.is_file() {
+        let recovery = connect_database(&recovery_path).await?;
+        migrate_database(&recovery).await?;
+        return Ok((recovery, "recovery"));
+    }
+
+    let primary = connect_database(&primary_path).await?;
+    let primary_needs_initialization = !migrations_table_exists(&primary).await?;
+    match migrate_database(&primary).await {
+        Ok(()) => Ok((primary, "primary")),
+        Err(error) if primary_needs_initialization && database_is_locked(&error) => {
+            tracing::warn!(
+                event = "database_recovery",
+                reason = "locked_empty_primary",
+                "preserving locked empty primary database and initializing recovery database"
+            );
+            primary.close().await;
+            let recovery = connect_database(&recovery_path).await?;
+            migrate_database(&recovery).await?;
+            Ok((recovery, "recovery"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn connect_database(path: &Path) -> anyhow::Result<SqlitePool> {
+    let db_url = format!("sqlite://{}", path.display());
+    let options = SqliteConnectOptions::from_str(&db_url)?
+        .create_if_missing(true)
+        // A previous one-replica revision can retain a normal SQLite lock
+        // briefly while the durable Azure Files mount is handed over. Wait
+        // for that hand-off instead of failing startup. Do not issue a
+        // `PRAGMA journal_mode` here: switching journal modes requires an
+        // exclusive lock that SQLite cannot wait for with busy_timeout.
+        .busy_timeout(Duration::from_secs(30))
+        .foreign_keys(true);
+    Ok(SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(options)
+        .await?)
+}
+
+fn database_is_locked(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("database is locked"))
 }
 
 /// Validate an already-current schema without issuing SQLite's write-oriented
@@ -144,12 +182,7 @@ async fn migrate_database(db: &SqlitePool) -> anyhow::Result<()> {
 }
 
 async fn schema_is_current(db: &SqlitePool) -> anyhow::Result<bool> {
-    let has_migrations_table: i64 = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
-    )
-    .fetch_one(db)
-    .await?;
-    if has_migrations_table == 0 {
+    if !migrations_table_exists(db).await? {
         tracing::info!(event = "schema_validation", reason = "migration_table_missing");
         return Ok(false);
     }
@@ -175,6 +208,15 @@ async fn schema_is_current(db: &SqlitePool) -> anyhow::Result<bool> {
         matches,
     );
     Ok(matches)
+}
+
+async fn migrations_table_exists(db: &SqlitePool) -> anyhow::Result<bool> {
+    let exists: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(db)
+    .await?;
+    Ok(exists != 0)
 }
 
 async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<()> {
