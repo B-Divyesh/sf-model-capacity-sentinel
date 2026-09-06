@@ -1,11 +1,11 @@
 # Verify model API capacity monitoring — PASS
 
 Verified 2026-09-06 UTC from a clean checkout of implementation
-`700c520391446b89b7ca82570ccb5e9cb7cbf716`. The current documentation commit
-is `784a4d372874016fcdce97271a18c7d79afcbd0a`; it changes only this handoff
-and verification report, not product code. The live service returns that
-documentation build SHA, so its served source is the reviewed implementation
-plus report-only changes.
+`700c520391446b89b7ca82570ccb5e9cb7cbf716`. The documentation commit served
+at verification was `784a4d372874016fcdce97271a18c7d79afcbd0a`; it changes
+only this handoff and verification report, not product code. The live service
+returns that documentation build SHA, so its served source is the reviewed
+implementation plus report-only changes.
 
 ## Verdict
 
