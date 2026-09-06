@@ -33,6 +33,36 @@ test("@claim:demo-sandbox opens realistic sample data without using a project AP
   ).toContain("North America chat availability");
 });
 
+test("@claim:browser-privacy-egress loads no analytics or third-party resources", async ({
+  page,
+}) => {
+  const requests: Array<{ method: string; origin: string; path: string }> = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    requests.push({ method: request.method(), origin: url.origin, path: url.pathname });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Try it with sample data" }).click();
+  await expect(page).toHaveURL(/\/demo$/);
+  await expect(
+    page.getByText("Demo — sample data, nothing is saved"),
+  ).toBeVisible();
+
+  const ownOrigin = new URL(page.url()).origin;
+  expect(requests.every((request) => request.origin === ownOrigin)).toBe(true);
+  expect(requests.filter((request) => request.path.startsWith("/api/"))).toEqual([]);
+  expect(
+    requests.filter(
+      (request) =>
+        request.method !== "GET" ||
+        !(
+          ["/", "/demo", "/sw.js", "/favicon.svg"].includes(request.path) ||
+          request.path.startsWith("/assets/")
+        ),
+    ),
+  ).toEqual([]);
+});
+
 test("@claim:demo-reset restores the shipped sample and start-for-real does not carry it into a project", async ({
   page,
 }) => {

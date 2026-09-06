@@ -14,6 +14,13 @@
     "sandbox": "fresh browser context at /demo; edit sample, reset it, then leave demo"
   },
   {
+    "id": "browser-privacy-egress",
+    "claim": "Load the product and sample without analytics, third-party resources, or project API calls",
+    "where": "privacy policy and README",
+    "test": "npm run test:e2e -- --grep @claim:browser-privacy-egress",
+    "sandbox": "fresh browser context; record every request while opening the landing page and entering the sample"
+  },
+  {
     "id": "sample-monitoring-output",
     "claim": "Show attributed 429 capacity evidence, an open alert, and a recovered alert",
     "where": "demo dashboard",

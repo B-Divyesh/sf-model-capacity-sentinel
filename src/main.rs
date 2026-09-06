@@ -526,7 +526,6 @@ async fn shutdown() {
 #[cfg(test)]
 mod integration_tests {
     use super::*;
-    use crate::routes::resolve_public_endpoint;
     use axum::{
         body::{to_bytes, Body},
         http::{Request, StatusCode},
@@ -870,8 +869,9 @@ mod integration_tests {
     #[tokio::test]
     async fn claim_public_endpoint_safety() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(temp.path()).await;
-        let app = router(state, temp.path());
+        let mut state = test_state(temp.path()).await;
+        state.allow_private_endpoints = false;
+        let app = router(state.clone(), temp.path());
         assert_eq!(
             app.clone()
                 .oneshot(
@@ -886,20 +886,29 @@ mod integration_tests {
             StatusCode::UNAUTHORIZED
         );
         for endpoint in [
+            "http://0.0.0.0/chat",
             "http://127.0.0.1:8080/chat",
             "http://10.0.0.1/chat",
+            "http://100.64.0.1/chat",
+            "http://172.16.0.1/chat",
             "http://169.254.1.1/chat",
             "http://192.168.1.1/chat",
             "http://[::1]/chat",
+            "http://[fc00::1]/chat",
             "http://[fe80::1]/chat",
         ] {
-            assert!(
-                resolve_public_endpoint(&url::Url::parse(endpoint).unwrap(), false)
-                    .await
-                    .is_err(),
-                "{endpoint} must be rejected before a probe can be saved"
-            );
+            let response = app
+                .clone()
+                .oneshot(json_request("POST", "/api/probes", probe_input(endpoint)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{endpoint}");
         }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM probes")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "rejected targets must not be stored");
     }
 
     // @claim:scheduled-probes
@@ -1025,12 +1034,16 @@ mod integration_tests {
     async fn claim_failure_classification_reports_shape_timeout_network_and_upstream_errors() {
         let mock = Router::new()
             .route(
+                "/nested-json-path",
+                post(|| async { successful_completion(r#"{"result":{"status":"ok"}}"#) }),
+            )
+            .route(
                 "/invalid-json",
                 post(|| async { successful_completion("not JSON") }),
             )
             .route(
                 "/missing-field",
-                post(|| async { successful_completion(r#"{"other":"value"}"#) }),
+                post(|| async { successful_completion(r#"{"result":{"other":"value"}}"#) }),
             )
             .route(
                 "/upstream",
@@ -1052,6 +1065,14 @@ mod integration_tests {
         let temp = tempfile::tempdir().unwrap();
         let state = test_state(temp.path()).await;
         let app = router(state.clone(), temp.path());
+
+        let mut nested_input = probe_input(format!("http://{address}/nested-json-path"));
+        nested_input["required_fields"] = json!(["result.status"]);
+        let nested_id = create_probe(&app, &state, nested_input).await;
+        let nested_observation = run_probe(&app, &nested_id).await;
+        assert_eq!(nested_observation["outcome"], "healthy");
+        assert_eq!(nested_observation["invariant_valid"], 1);
+
         let cases = [
             ("invalid-json", "invalid_json"),
             ("missing-field", "invariant"),
@@ -1060,12 +1081,21 @@ mod integration_tests {
         ];
         for (path, expected) in cases {
             let mut input = probe_input(format!("http://{address}/{path}"));
+            if path == "missing-field" {
+                input["required_fields"] = json!(["result.status"]);
+            }
             if path == "slow" {
                 input["timeout_ms"] = json!(1000);
             }
             let id = create_probe(&app, &state, input).await;
             let observation = run_probe(&app, &id).await;
             assert_eq!(observation["error_class"], expected);
+            if path == "missing-field" {
+                assert!(observation["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("result.status"));
+            }
         }
 
         let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1351,6 +1381,35 @@ mod integration_tests {
                 !serialized.contains(private_value),
                 "operational records must not return {private_value}"
             );
+        }
+
+        let stored_observation: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT error_class, detail FROM observations WHERE probe_id=? LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(stored_observation.0, None);
+        assert_eq!(stored_observation.1.as_deref(), Some("All required fields present"));
+        state.db.close().await;
+        for entry in std::fs::read_dir(temp.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if !path.is_file() {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            for private_value in [
+                b"private-api-key".as_slice(),
+                b"Synthetic private canary text".as_slice(),
+                b"provider-private-answer".as_slice(),
+            ] {
+                assert!(
+                    !bytes.windows(private_value.len()).any(|window| window == private_value),
+                    "{} must not retain private request or response content",
+                    path.display()
+                );
+            }
         }
     }
 

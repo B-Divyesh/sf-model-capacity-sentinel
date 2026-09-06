@@ -49,7 +49,10 @@ fn start_runner(data_dir: &std::path::Path, port: u16) -> Child {
         .env_clear()
         .env("PORT", port.to_string())
         .env("DATA_DIR", data_dir)
-        .env("SENTINEL_ACCESS_TOKEN", "test-access-token-that-is-long-enough")
+        .env(
+            "SENTINEL_ACCESS_TOKEN",
+            "test-access-token-that-is-long-enough",
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -128,7 +131,7 @@ async fn claim_durable_project_state_survives_a_runner_restart() {
 #[cfg(unix)]
 #[tokio::test]
 async fn claim_nonroot_runner_starts_with_a_writable_data_directory() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     let temp = tempfile::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -136,7 +139,17 @@ async fn claim_nonroot_runner_starts_with_a_writable_data_directory() {
     std::fs::create_dir(&data_dir).unwrap();
     std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
     let port = free_port();
-    let mut command = if std::process::id() == 0 {
+    let current_uid: u32 = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let expected_uid = if current_uid == 0 { 65532 } else { current_uid };
+    assert_ne!(
+        expected_uid, 0,
+        "the claim must exercise a non-root process"
+    );
+    let mut command = if current_uid == 0 {
         let mut command = Command::new("setpriv");
         command
             .args(["--reuid=65532", "--regid=65532", "--clear-groups"])
@@ -156,6 +169,13 @@ async fn claim_nonroot_runner_starts_with_a_writable_data_directory() {
     wait_for_health(port).await;
     assert!(data_dir.join("sentinel.db").exists());
     assert!(data_dir.join("master.key").exists());
+    assert_eq!(
+        std::fs::metadata(data_dir.join("sentinel.db"))
+            .unwrap()
+            .uid(),
+        expected_uid,
+        "the running non-root user must create the durable database"
+    );
     child.kill().unwrap();
     child.wait().unwrap();
 }
