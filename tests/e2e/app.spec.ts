@@ -1,61 +1,182 @@
-import { test, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { test, expect } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
+import { readFile } from "node:fs/promises";
 
-const accessToken='e2e-access-token-that-is-at-least-24-chars';
-async function seedAccess(page:import('@playwright/test').Page){
-  await page.addInitScript(token=>sessionStorage.setItem('capacity-sentinel-access',token),accessToken);
-}
-
-test('first visit waits for an access code without a failed bootstrap request',async({page})=>{
-  const consoleErrors:string[]=[];
-  const summaryRequests:string[]=[];
-  page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text())});
-  page.on('request',request=>{if(new URL(request.url()).pathname==='/api/summary')summaryRequests.push(request.url())});
-  await page.goto('/');
-  await expect(page.getByRole('heading',{name:"Open this project’s field sheet"})).toBeVisible();
-  expect(summaryRequests).toEqual([]);
-  expect(consoleErrors).toEqual([]);
-  await page.getByLabel('Project access code').fill(accessToken);
-  await page.getByLabel('Project access code').press('Enter');
-  await expect(page.getByRole('heading',{name:"Open this project’s field sheet"})).not.toBeVisible();
-  await expect(page.getByText('Preparing the field sheet…')).not.toBeVisible();
-  expect(summaryRequests).toHaveLength(1);
-  expect(consoleErrors).toEqual([]);
+test("@claim:demo-sandbox opens realistic sample data without using a project API", async ({
+  page,
+}) => {
+  const apiRequests: string[] = [];
+  const origins = new Set<string>();
+  page.on("request", (request) => {
+    origins.add(new URL(request.url()).origin);
+    if (new URL(request.url()).pathname.startsWith("/api/"))
+      apiRequests.push(request.url());
+  });
+  await page.goto("/demo");
+  await expect(page).toHaveTitle("Demo — Capacity Sentinel");
+  await expect(
+    page.getByText("Demo — sample data, nothing is saved"),
+  ).toBeVisible();
+  await expect(page.locator(".specimen").first().locator(".expand")).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Open alerts" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Recovered alerts" }),
+  ).toBeVisible();
+  expect(apiRequests).toEqual([]);
+  expect([...origins]).toEqual([new URL(page.url()).origin]);
+  expect(
+    await page.evaluate(() =>
+      localStorage.getItem("demo:capacity-sentinel:summary"),
+    ),
+  ).toContain("North America chat availability");
 });
 
-test('empty state, legal routes, and keyboard dialog work',async({page})=>{
-  await seedAccess(page);
-  const consoleErrors:string[]=[];
-  const failedResponses:string[]=[];
-  page.on('console',message=>{if(message.type()==='error')consoleErrors.push(message.text())});
-  page.on('response',response=>{if(response.status()>=400)failedResponses.push(`${response.status()} ${response.url()}`)});
-  await page.goto('/');
-  await expect(page).toHaveTitle(/Capacity Sentinel/);
-  await expect(page.locator('main')).toHaveCount(1);
-  await expect(page.getByRole('heading',{level:1})).toHaveCount(1);
-  await expect(page.getByText('No specimens yet')).toBeVisible();
-  const scan=await new AxeBuilder({page}).analyze();
-  expect(scan.violations.filter(v=>v.impact==='serious'||v.impact==='critical')).toEqual([]);
-  await page.getByRole('button',{name:'Add your first probe'}).click();
-  await expect(page.getByRole('dialog')).toBeVisible();
-  await expect(page.getByLabel('Canary name')).toBeFocused();
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).not.toBeVisible();
-  await page.goto('/privacy');
-  await expect(page.getByRole('heading',{level:1})).toHaveText('Privacy, by habitat.');
-  await page.goto('/terms');
-  await expect(page.getByRole('heading',{level:1})).toHaveText('Terms of use.');
-  expect([...consoleErrors,...failedResponses]).toEqual([]);
+test("@claim:demo-reset restores the shipped sample and start-for-real does not carry it into a project", async ({
+  page,
+}) => {
+  await page.goto("/demo");
+  await page
+    .getByRole("button", { name: "Edit Europe structured output" })
+    .click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.getByLabel("Probe name").fill("Changed only in sample");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.locator(".specimen").nth(1).locator(".expand")).toBeVisible();
+  expect(
+    await page.evaluate(() =>
+      localStorage.getItem("demo:capacity-sentinel:summary"),
+    ),
+  ).toContain("Changed only in sample");
+  await page.getByRole("button", { name: "Reset demo" }).click();
+  await expect(page.locator(".specimen").nth(1).locator(".expand")).toBeVisible();
+  await expect(page.getByText("Changed only in sample")).toHaveCount(0);
+  await page.getByRole("button", { name: "Start for real" }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(
+    page.getByRole("heading", { name: "Open this project" }),
+  ).toBeVisible();
 });
 
-test('populated dashboard has no serious or critical accessibility violations',async({page},testInfo)=>{
-  await seedAccess(page);
-  const name=`Public endpoint specimen ${testInfo.project.name}`;
-  const created=await page.request.post('/api/probes',{headers:{Authorization:`Bearer ${accessToken}`},data:{name,provider:'Example',endpoint_url:'https://example.com/chat',model:'test-model',api_key:'test-key',prompt:'Synthetic QA probe only',required_fields:['status'],interval_minutes:5,timeout_ms:2000,latency_slo_ms:1000,availability_slo_percent:99,max_output_tokens:32,daily_token_cap:1000,enabled:true}});
-  expect(created.status()).toBe(201);
-  await page.goto('/');
-  await expect(page.getByText(name,{exact:true})).toBeVisible();
-  await expect(page.locator('.ticks[role="img"]').first()).toBeVisible();
-  const scan=await new AxeBuilder({page}).analyze();
-  expect(scan.violations.filter(v=>v.impact==='serious'||v.impact==='critical')).toEqual([]);
+test("@claim:sample-monitoring-output shows attributed capacity evidence and recovery", async ({
+  page,
+}) => {
+  await page.goto("/demo");
+  await expect(page.getByText(/2 consecutive capacity failures/)).toBeVisible();
+  await expect(
+    page.getByText(/p95 latency recovered below the 1,800 ms objective/),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Observe Europe structured output now" })
+    .click();
+  await expect(
+    page.getByText("Observation complete for Europe structured output"),
+  ).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Open alerts" })).toHaveCount(
+    0,
+  );
+});
+
+test("@claim:edit-probe updates an existing probe with pointer and keyboard operation", async ({
+  page,
+}) => {
+  await page.goto("/demo");
+  const edit = page.getByRole("button", {
+    name: "Edit North America chat availability",
+  });
+  await edit.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await expect(page.getByLabel("Probe name")).toBeFocused();
+  await page.getByRole("dialog").getByLabel("Model").fill("chat-pro-2026-revised");
+  await page.getByRole("button", { name: "Save changes" }).click();
+  await expect(page.locator(".specimens")).toContainText("chat-pro-2026-revised");
+});
+
+test("@claim:csv-export downloads every sample observation as CSV", async ({
+  page,
+}) => {
+  await page.goto("/demo");
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export CSV" }).click();
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  const content = await readFile(downloadPath!, "utf8");
+  expect(content).toContain("probe,provider,model,started_at,latency_ms");
+  expect(content?.split("\n").length).toBeGreaterThanOrEqual(4);
+  expect(content).toContain("North America chat availability");
+});
+
+test("@claim:accessible-mobile-dashboard is usable by keyboard and has no serious axe issues", async ({
+  page,
+}) => {
+  await page.goto("/demo");
+  await page.keyboard.press("Tab");
+  await expect(page.getByText("Skip to main content")).toBeFocused();
+  const scan = await new AxeBuilder({ page }).analyze();
+  expect(
+    scan.violations.filter(
+      (violation) =>
+        violation.impact === "serious" || violation.impact === "critical",
+    ),
+  ).toEqual([]);
+  expect(
+    await page
+      .locator("body")
+      .evaluate((body) => body.scrollWidth <= window.innerWidth),
+  ).toBe(true);
+  const targetSizes = await page
+    .locator(".site-head nav a, footer nav a")
+    .evaluateAll((targets) =>
+      targets.map((target) => {
+        const box = target.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      }).filter((target) => target.width > 0 && target.height > 0),
+    );
+  expect(
+    targetSizes.every((target) => target.width >= 44 && target.height >= 44),
+  ).toBe(true);
+});
+
+test("@claim:route-structure gives legal routes titles and a designed 404 page", async ({
+  page,
+}) => {
+  await page.goto("/privacy");
+  await expect(page).toHaveTitle("Privacy — Capacity Sentinel");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Read the privacy policy" }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Terms" }).click();
+  await expect(page).toHaveTitle("Terms — Capacity Sentinel");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Read the terms of use" }),
+  ).toBeFocused();
+  const missing = await page.request.get("/a-page-that-does-not-exist");
+  expect(missing.status()).toBe(404);
+  expect(await missing.text()).toContain("This page was not found");
+});
+
+test("@claim:access-code-rate-limit rejects repeated invalid access codes with retry guidance", async ({
+  page,
+}, testInfo) => {
+  await page.goto("/demo");
+  const clientIp =
+    testInfo.project.name === "mobile" ? "198.51.100.82" : "198.51.100.81";
+  const responses = await Promise.all(
+    Array.from({ length: 45 }, () =>
+      page.request.get("/api/summary", {
+        headers: {
+          Authorization: "Bearer invalid-access-code",
+          "X-Forwarded-For": clientIp,
+        },
+      }),
+    ),
+  );
+  const limited = responses.filter((response) => response.status() === 429);
+  expect(limited.length).toBeGreaterThan(0);
+  expect(Number(limited[0].headers()["retry-after"])).toBeGreaterThanOrEqual(1);
+  expect(
+    responses.filter((response) => response.status() === 401).length,
+  ).toBeGreaterThan(0);
 });

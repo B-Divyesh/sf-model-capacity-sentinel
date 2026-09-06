@@ -8,6 +8,7 @@
     "dev:server": "cargo run",
     "build": "vite build",
     "test": "vitest run && cargo test",
+    "test:claims": "node scripts/run-claims.mjs",
     "test:e2e": "playwright test",
     "check": "svelte-check --tsconfig ./tsconfig.json && cargo clippy -- -D warnings"
   },

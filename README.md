@@ -1,84 +1,102 @@
 # Capacity Sentinel
 
-Capacity Sentinel is a self-hosted canary runner for teams that depend on one or more model APIs. It sends synthetic prompts on a schedule, records vendor-neutral availability and elapsed-request latency, validates JSON response invariants, and opens an attributed alert after two consecutive failures.
+Capacity Sentinel monitors model API capacity, latency, and JSON response shape
+with synthetic canary requests. It is for teams that operate applications using
+one or more model APIs.
 
-It is not a production prompt proxy, model router, or semantic-quality judge. Production prompts never pass through this service.
+Start with [the one-click sample](/demo). It shows two model endpoints, a 429
+capacity alert, and a recovered alert without opening a project.
 
-## Included in v1
+## What it does
 
-- OpenAI-compatible chat-completion probes against public HTTP(S) endpoints (private, loopback, link-local, and redirected targets are blocked)
-- Manual and scheduled observations with 429, timeout, network, upstream, invalid-JSON, and invariant-failure classification
-- Rolling availability and p95 latency evidence per provider/model
-- Alerts after two consecutive failures and automatic recovery resolution
-- AES-256-GCM encryption for API keys and synthetic canaries; canary text is never returned by the API
-- Daily per-probe token caps and response-token limits
-- Local SQLite storage and unrestricted CSV export
-- Keyboard/mobile-ready dashboard, offline/error/empty states, and privacy/terms pages
-- Optional $39 Atlas license handoff through Sociobot; no payment provider is embedded
+- Keeps one project on its own self-hosted runner.
+- Runs synthetic OpenAI-compatible chat-completion probes on a schedule.
+- Records status, elapsed request time, and required JSON-field checks.
+- Opens provider/model-specific alerts after repeated failures.
+- Lets operators edit probes, delete their local history, and export CSV.
+- Keeps credentials and synthetic prompts encrypted in the local runner.
+
+It does not proxy production prompts, route production traffic, or judge model
+truthfulness or general quality.
+
+## Demo
+
+Open `/demo` or choose **Try it with sample data** on the landing page. Demo
+data lives only under the browser-local `demo:capacity-sentinel:summary` key.
+It never calls the project API or writes runner data. **Reset demo** restores
+the original sample; **Start for real** opens the separate access-code screen.
+See [`.factory/demo.md`](.factory/demo.md) for the exact sample and isolation
+boundary.
 
 ## Run locally
 
-Prerequisites: Node 22+, npm, and Rust 1.90+.
+Prerequisites: Node 22+, npm, and current stable Rust.
 
 ```bash
 npm ci
 npm run build
-SENTINEL_ACCESS_TOKEN='replace-with-a-long-random-project-code' DATA_DIR=./data cargo run
+PORT=8080 cargo run
 ```
 
-Open <http://localhost:8080>. The service creates `data/sentinel.db` and `data/master.key`; the key file is mode `0600` on Unix. Back up both together. To supply key material through a secret manager, set `SENTINEL_MASTER_KEY` (it is SHA-256-derived in memory and never logged).
+Open <http://localhost:8080>. With no secret configuration, the runner creates
+an access code and encryption material in `./data`. In a container it uses the
+durable `/data` mount when present. Set `SENTINEL_ACCESS_TOKEN` to provide a
+project access code; set `SENTINEL_MASTER_KEY` only when you manage the
+encryption key outside the runner.
 
-For frontend development, run `npm run dev:server` and `npm run dev` in separate terminals. Vite proxies `/api` and `/health` to port 8080.
+Use the project access code for every `/api/*` request. API requests are
+limited per client before access-code validation. Excess requests receive 429
+and `Retry-After`.
 
-## Configure a canary
-
-Provide the full public OpenAI-compatible chat-completions URL, a provider label, model, API key, synthetic prompt, and optional comma-separated JSON dot paths such as `status, result.label`. The probe asks for a JSON object and checks that every declared path exists. It stores status, total request latency, token counts, and validation evidence—not response content or plaintext canary text. Endpoint DNS is checked on save and again before every run; the run is pinned to the approved addresses and redirects are not followed.
-
-The scheduler checks for due probes every 30 seconds. A probe interval can be 1–1,440 minutes. Two consecutive failures raise an availability alert; three or more samples above the p95 objective raise a latency alert. Recovered conditions resolve their open alert.
-
-## Verify and build
+## Verify from a clean checkout
 
 ```bash
-npm test          # frontend unit + Rust unit/integration tests
-npm run test:e2e # Playwright desktop + 390px mobile + axe checks
-npm run check     # Svelte types + strict Clippy
-npm run build     # production frontend -> dist/
+npm ci
+npm test
+npm run check
+npm run build
+npm run test:e2e
+npm run test:claims
+BUILD_SHA=local-check cargo build --locked --release
 ```
+
+`npm run test:claims` runs every command in
+[`.factory/claims.json`](.factory/claims.json). Each browser claim starts from
+the shipped `/demo` entry point or another explicitly described temporary
+runner sandbox.
 
 ## Container deployment
 
 ```bash
 docker build --build-arg BUILD_SHA=$(git rev-parse HEAD) -t capacity-sentinel .
-docker run --rm -p 8080:8080 -e SENTINEL_ACCESS_TOKEN='replace-with-a-long-random-project-code' -v sentinel-data:/data capacity-sentinel
+docker run --rm -p 8080:8080 -v sentinel-data:/data capacity-sentinel
 ```
 
-The multi-stage image runs as a non-root distroless user, exposes port 8080, serves the built frontend, and persists SQLite plus encryption material under `/data`. `/health` returns status and the immutable build SHA baked in by `--build-arg BUILD_SHA`; the same value is recorded in the image's OCI revision label.
+The multi-stage image runs as non-root, listens on `PORT` (default 8080), and
+needs no required environment variables. It stores SQLite, generated keys, and
+the generated access code under `/data`. `/health` returns its baked build
+identity.
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | `8080` | HTTP listen port |
-| `DATA_DIR` | `./data` | SQLite and generated key directory |
-| `STATIC_DIR` | `dist` | Built frontend directory |
+| `DATA_DIR` | `/data` when mounted, otherwise `./data` | SQLite and generated key directory |
+| `STATIC_DIR` | `/app/dist` in container, otherwise `dist` | Built frontend directory |
 | `SENTINEL_MASTER_KEY` | generated local key | External master-key material |
-| `SENTINEL_ACCESS_TOKEN` | generated 32-byte token in `DATA_DIR/access.token` | Required project access code for all API data and writes; set explicitly for deployed instances |
-| `RUST_LOG` | `info` | Structured JSON log filter |
+| `SENTINEL_ACCESS_TOKEN` | generated local token | Project access code |
 
-Every API endpoint requires the project access code, including summaries and CSV export. The dashboard keeps it only in browser session storage. API traffic is limited per originating client (the first trusted `X-Forwarded-For` hop, with socket-peer fallback): all requests allow a burst of 40 and replenish at 20/second, while writes allow a burst of 20 and replenish at 4/second. Limit responses are `429` with `Retry-After`. Cross-origin browser calls are not enabled, request bodies are capped at 64 KB, and credentials and canary text are never returned by the API.
+## Atlas add-on
 
-At startup the service writes a structured `startup_configuration` record describing whether paths and ports use supplied or default values and whether each secret was supplied, persisted, or generated. Secret values are never logged.
+Atlas is a $39 one-time paid add-on for the 365-day comparison view. The free
+runner keeps probe editing, alerts, safety information, and CSV export. The
+Sociobot billing registration for this product is currently pending, so checkout
+is not offered yet. License restore and verification use Sociobot when a valid
+license is available.
 
-## Load smoke
+## Privacy and license
 
-With the server running, test the read path at 100 requests/second using `oha`:
-
-```bash
-oha -z 10s -q 100 http://127.0.0.1:8080/health
-```
-
-## Data and billing
-
-All operational data stays in the local SQLite volume. The only optional third-party call from the web app is an Atlas license verification request to `api.sociobot.in`. Sociobot/Dodo is merchant of record. See `/privacy` and `/terms` in the running application.
-
-## License
+Read `/privacy` and `/terms` in the running product. Capacity Sentinel has no
+analytics or third-party scripts. The optional license verification request is
+made to Sociobot only after a visitor chooses to restore or verify a license.
 
 MIT. See [LICENSE](LICENSE).

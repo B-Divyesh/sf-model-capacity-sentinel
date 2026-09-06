@@ -1,7 +1,8 @@
 use std::{process::{Command, Stdio}, thread, time::Duration};
 
+// @claim:local-persistence-health
 #[test]
-fn startup_logs_generated_secret_sources_without_rust_log() {
+fn claim_local_persistence_health() {
     let temp = tempfile::tempdir().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_model-capacity-sentinel"))
         .env_clear()

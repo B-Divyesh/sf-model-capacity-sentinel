@@ -56,7 +56,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let data_dir_supplied = std::env::var_os("DATA_DIR").is_some();
-    let data_dir = PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into()));
+    let default_data_dir = if Path::new("/data").is_dir() {
+        "/data"
+    } else {
+        "./data"
+    };
+    let data_dir = PathBuf::from(
+        std::env::var("DATA_DIR").unwrap_or_else(|_| default_data_dir.into()),
+    );
     std::fs::create_dir_all(&data_dir)?;
     let db_url = format!("sqlite://{}", data_dir.join("sentinel.db").display());
     let opts = SqliteConnectOptions::from_str(&db_url)?
@@ -80,7 +87,12 @@ async fn main() -> anyhow::Result<()> {
     };
     tokio::spawn(scheduler(state.clone()));
     let static_dir_supplied = std::env::var_os("STATIC_DIR").is_some();
-    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into());
+    let default_static_dir = if Path::new("/app/dist").is_dir() {
+        "/app/dist"
+    } else {
+        "dist"
+    };
+    let static_dir = std::env::var("STATIC_DIR").unwrap_or_else(|_| default_static_dir.into());
     let app = router(state, Path::new(&static_dir));
     let port_supplied = std::env::var_os("PORT").is_some();
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
@@ -176,7 +188,8 @@ fn access_token(data_dir: &Path) -> anyhow::Result<(Arc<str>, &'static str)> {
 
 fn router(state: AppState, static_dir: &Path) -> Router {
     let index = static_dir.join("index.html");
-    let fallback = ServeDir::new(static_dir);
+    let fallback = ServeDir::new(static_dir)
+        .not_found_service(ServeFile::new(static_dir.join("404.html")));
     // General API traffic gets a 20 req/s, burst-40 budget. Mutating routes
     // additionally get a stricter 4 req/s, burst-20 budget. Both budgets are
     // per client at the trusted ingress boundary.
@@ -216,6 +229,7 @@ fn router(state: AppState, static_dir: &Path) -> Router {
         .layer(GovernorLayer::new(api_limit).error_handler(rate_limit_response));
     Router::new()
         .route_service("/", ServeFile::new(&index))
+        .route_service("/demo", ServeFile::new(&index))
         .route_service("/privacy", ServeFile::new(&index))
         .route_service("/terms", ServeFile::new(&index))
         .route("/health", get(routes::health))
@@ -470,8 +484,9 @@ mod integration_tests {
             .unwrap()
     }
 
+    // @claim:encrypted-storage-and-classification
     #[tokio::test]
-    async fn api_lifecycle_attributes_repeated_capacity_failures() {
+    async fn claim_encrypted_storage_and_failure_attribution() {
         let mock = Router::new().route(
             "/chat",
             post(|| async {
@@ -594,8 +609,9 @@ mod integration_tests {
         assert_ne!(health["build"], "unknown");
     }
 
+    // @claim:public-endpoint-safety
     #[tokio::test]
-    async fn api_requires_an_access_code_and_rejects_private_probe_targets() {
+    async fn claim_public_endpoint_safety() {
         let temp = tempfile::tempdir().unwrap();
         let state = test_state(temp.path()).await;
         let app = router(state, temp.path());
@@ -633,6 +649,49 @@ mod integration_tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_api_attempts_are_limited_before_access_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = router(test_state(temp.path()).await, temp.path());
+        let mut requests = tokio::task::JoinSet::new();
+        for later_proxy_hop in 1..=41 {
+            let app = app.clone();
+            requests.spawn(async move {
+                app.oneshot(
+                    Request::get("/api/summary")
+                        .header("authorization", "Bearer deliberately-wrong")
+                        .header(
+                            "x-forwarded-for",
+                            format!("198.51.100.60, 10.0.0.{later_proxy_hop}"),
+                        )
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            });
+        }
+        let mut unauthorized = 0;
+        let mut limited = Vec::new();
+        while let Some(result) = requests.join_next().await {
+            let response = result.unwrap();
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                limited.push(response);
+            } else {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                unauthorized += 1;
+            }
+        }
+        assert_eq!(unauthorized, 40);
+        assert_eq!(limited.len(), 1);
+        assert!(limited[0]
+            .headers()
+            .get(header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+            .is_some_and(|seconds| seconds >= 1));
     }
 
     #[tokio::test]

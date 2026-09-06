@@ -1,0 +1,86 @@
+[
+  {
+    "id": "demo-sandbox",
+    "claim": "Try the populated sample workspace without opening a project or calling the project API",
+    "where": "landing page and /demo",
+    "test": "npm run test:e2e -- --grep @claim:demo-sandbox",
+    "sandbox": "fresh browser context at /demo; record requests and inspect local demo namespace"
+  },
+  {
+    "id": "demo-reset",
+    "claim": "Reset sample changes and start for real without carrying sample data into a project",
+    "where": "demo banner",
+    "test": "npm run test:e2e -- --grep @claim:demo-reset",
+    "sandbox": "fresh browser context at /demo; edit sample, reset it, then leave demo"
+  },
+  {
+    "id": "sample-monitoring-output",
+    "claim": "Show attributed 429 capacity evidence, an open alert, and a recovered alert",
+    "where": "demo dashboard",
+    "test": "npm run test:e2e -- --grep @claim:sample-monitoring-output",
+    "sandbox": "fresh browser context at /demo with shipped sample observations"
+  },
+  {
+    "id": "edit-probe",
+    "claim": "Edit an existing probe without deleting its history",
+    "where": "probe row edit control",
+    "test": "npm run test:e2e -- --grep @claim:edit-probe",
+    "sandbox": "fresh browser context at /demo; keyboard-open edit dialog and save a changed model"
+  },
+  {
+    "id": "csv-export",
+    "claim": "Export observations as CSV",
+    "where": "dashboard action",
+    "test": "npm run test:e2e -- --grep @claim:csv-export",
+    "sandbox": "fresh browser context at /demo; inspect downloaded header and all shipped rows"
+  },
+  {
+    "id": "accessible-mobile-dashboard",
+    "claim": "Use the sample dashboard with a keyboard on phone-sized screens",
+    "where": "landing page and demo dashboard",
+    "test": "npm run test:e2e -- --grep @claim:accessible-mobile-dashboard",
+    "sandbox": "fresh browser context at /demo; keyboard smoke test, axe scan, and horizontal-overflow check in desktop and 390px projects"
+  },
+  {
+    "id": "route-structure",
+    "claim": "Provide Privacy, Terms, and a readable 404 page",
+    "where": "header and footer",
+    "test": "npm run test:e2e -- --grep @claim:route-structure",
+    "sandbox": "fresh browser context; open legal routes and request an unknown path"
+  },
+  {
+    "id": "access-code-rate-limit",
+    "claim": "Require a project access code and rate-limit invalid API attempts with 429 and Retry-After",
+    "where": "project access screen and README",
+    "test": "npm run test:e2e -- --grep @claim:access-code-rate-limit",
+    "sandbox": "fresh browser context enters /demo, then sends a fixed-client invalid-token burst to the local product API"
+  },
+  {
+    "id": "encrypted-storage-and-classification",
+    "claim": "Encrypt canary credentials at rest and classify repeated 429 capacity failures",
+    "where": "probe dialog and product documentation",
+    "test": "cargo test claim_encrypted_storage_and_failure_attribution",
+    "sandbox": "temporary SQLite runner with a local mock endpoint; inspect stored ciphertext and observable summary/alert output"
+  },
+  {
+    "id": "public-endpoint-safety",
+    "claim": "Reject private and loopback probe targets",
+    "where": "probe endpoint help",
+    "test": "cargo test claim_public_endpoint_safety",
+    "sandbox": "temporary runner validates loopback endpoint input"
+  },
+  {
+    "id": "local-persistence-health",
+    "claim": "Start with no secrets configured and persist generated local runner material",
+    "where": "README",
+    "test": "cargo test claim_local_persistence_health",
+    "sandbox": "clean process environment and temporary working directory"
+  },
+  {
+    "id": "license-restore",
+    "claim": "Store a returned or pasted Atlas license in this browser before verification",
+    "where": "Atlas restore dialog",
+    "test": "npx vitest run -t @claim:license-restore",
+    "sandbox": "JSDOM localStorage and history fixture"
+  }
+]
