@@ -30,7 +30,7 @@ limits, paid-license behavior, and demo isolation were otherwise preserved.
 ## Source and release identity
 
 - Implementation commit: `7575d65e210ae685606cb1c7c72bb1239ce15bd7`
-- Documentation candidate: `DOCUMENTATION_SHA_PENDING`
+- Documentation candidate: `c3024f9726adf73de6a4b18c3a3ec2fcc5b68a53`
 - Live health build: `7575d65e210ae685606cb1c7c72bb1239ce15bd7`
 - Active immutable image:
   `sha256:9d8c5c1762353e0cfeeff7fad4872c7ee89a3a51d1ddb205009d458a5fd5ae2f`
