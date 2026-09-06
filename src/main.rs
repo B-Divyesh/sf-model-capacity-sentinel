@@ -533,6 +533,7 @@ mod integration_tests {
         routing::post,
         Json,
     };
+    use chrono::Utc;
     use serde_json::{json, Value};
     use std::{
         process::{Command, Stdio},
@@ -979,6 +980,44 @@ mod integration_tests {
         assert_eq!(stats["sample_count"], 3);
         assert_eq!(stats["availability_percent"], 100.0);
         assert!(stats["p95_latency_ms"].as_i64().unwrap() >= 25);
+    }
+
+    // @claim:atlas-365day-window
+    #[tokio::test]
+    async fn claim_atlas_comparison_only_receives_the_latest_365_days_of_observations() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = test_state(temp.path()).await;
+        let app = router(state.clone(), temp.path());
+        let id = create_probe(&app, &state, probe_input("http://127.0.0.1:9/chat")).await;
+        for (observation_id, started_at) in [
+            ("recent-observation", Utc::now()),
+            ("older-than-atlas-window", Utc::now() - chrono::Duration::days(366)),
+        ] {
+            sqlx::query("INSERT INTO observations(id,probe_id,started_at,latency_ms,http_status,outcome,error_class,detail,input_tokens,output_tokens,invariant_valid) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+                .bind(observation_id)
+                .bind(&id)
+                .bind(started_at.to_rfc3339())
+                .bind(120_i64)
+                .bind(200_i64)
+                .bind("healthy")
+                .bind(Option::<String>::None)
+                .bind("All required fields present")
+                .bind(3_i64)
+                .bind(5_i64)
+                .bind(1_i64)
+                .execute(&state.db)
+                .await
+                .unwrap();
+        }
+        let response = app
+            .oneshot(authenticated_request("GET", "/api/summary"))
+            .await
+            .unwrap();
+        let summary: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 100_000).await.unwrap()).unwrap();
+        let observations = summary["observations"].as_array().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0]["id"], "recent-observation");
     }
 
     // @claim:failure-classification

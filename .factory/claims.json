@@ -166,5 +166,12 @@
     "where": "Atlas add-on section",
     "test": "npm run test:e2e -- --grep @claim:atlas-comparison-view",
     "sandbox": "fresh browser at /demo with a browser-local valid license verdict and shipped sample observations"
+  },
+  {
+    "id": "atlas-365day-window",
+    "claim": "Limit Atlas comparison records to the latest 365 days",
+    "where": "Atlas add-on section and README",
+    "test": "cargo test claim_atlas_comparison_only_receives_the_latest_365_days_of_observations",
+    "sandbox": "temporary SQLite runner with one current and one 366-day-old observation"
   }
 ]
