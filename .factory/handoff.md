@@ -1,5 +1,24 @@
 # Capacity Sentinel repair 9 handoff
 
+## Independent verification 9
+
+**PASS — 0 findings and 0 untested public claims.** Independent QA reviewed
+implementation `7575d65e210ae685606cb1c7c72bb1239ce15bd7`; documentation and
+live `/health` identify `c4f64392faeac5837476ed0134077915621f9f95`, whose
+only later change is this handoff documentation.
+
+From a clean checkout, `npm ci`, `npm test`, `npm run check`, `npm run build`,
+`npm run test:e2e -- --reporter=line`, `npm run test:claims`, locked release
+build, and production dependency audit all passed. The 28 declared claims
+passed, including rolling-20 metrics and session-only access-code coverage.
+
+Fresh live desktop and phone QA passed the one-click isolated sample, reset,
+offline demo reload, keyboard/focus behavior, Axe scans, legal pages, designed
+404, repaired 44 px privacy email target, and HTTP/2 rate-limit allowance
+(40 × 401, 60 × 429 with `Retry-After: 1`). Lighthouse measured 99/100/100/100
+(performance/accessibility/best-practices/SEO). No product runtime or
+deployment state was changed. See `.factory/verification-9.md` for detail.
+
 ## Result
 
 **Repair complete.** The three verification-8 findings are fixed, all 28
