@@ -150,6 +150,7 @@ async fn schema_is_current(db: &SqlitePool) -> anyhow::Result<bool> {
     .fetch_one(db)
     .await?;
     if has_migrations_table == 0 {
+        tracing::info!(event = "schema_validation", reason = "migration_table_missing");
         return Ok(false);
     }
 
@@ -161,12 +162,19 @@ async fn schema_is_current(db: &SqlitePool) -> anyhow::Result<bool> {
         .iter()
         .filter(|migration| migration.migration_type.is_up_migration())
         .collect();
-    Ok(applied.len() == expected.len()
+    let matches = applied.len() == expected.len()
         && expected.iter().all(|migration| {
             applied.iter().any(|(version, checksum)| {
                 *version == migration.version && checksum.as_slice() == migration.checksum.as_ref()
             })
-        }))
+        });
+    tracing::info!(
+        event = "schema_validation",
+        applied_migration_count = applied.len(),
+        expected_migration_count = expected.len(),
+        matches,
+    );
+    Ok(matches)
 }
 
 async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<()> {
