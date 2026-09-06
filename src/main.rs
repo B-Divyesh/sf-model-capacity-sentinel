@@ -33,6 +33,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+
 #[derive(Clone)]
 pub struct AppState {
     db: SqlitePool,
@@ -76,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(5)
         .connect_with(opts)
         .await?;
-    sqlx::migrate!().run(&db).await?;
+    migrate_database(&db).await?;
     let master_key_source = key_source(&data_dir);
     let secrets = SecretBox::from_data_dir(&data_dir)?;
     migrate_plaintext_canaries(&db, &secrets).await?;
@@ -125,6 +127,46 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown())
     .await?;
     Ok(())
+}
+
+/// Validate an already-current schema without issuing SQLite's write-oriented
+/// `CREATE TABLE IF NOT EXISTS` migration prelude. That prelude can stay
+/// locked briefly on Azure Files after a one-replica handoff even when no
+/// migration is pending.
+async fn migrate_database(db: &SqlitePool) -> anyhow::Result<()> {
+    if schema_is_current(db).await? {
+        tracing::info!("database schema is current");
+        return Ok(());
+    }
+
+    MIGRATOR.run(db).await?;
+    Ok(())
+}
+
+async fn schema_is_current(db: &SqlitePool) -> anyhow::Result<bool> {
+    let has_migrations_table: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations')",
+    )
+    .fetch_one(db)
+    .await?;
+    if has_migrations_table == 0 {
+        return Ok(false);
+    }
+
+    let applied: Vec<(i64, Vec<u8>)> =
+        sqlx::query_as("SELECT version, checksum FROM _sqlx_migrations WHERE success = TRUE")
+            .fetch_all(db)
+            .await?;
+    let expected: Vec<_> = MIGRATOR
+        .iter()
+        .filter(|migration| migration.migration_type.is_up_migration())
+        .collect();
+    Ok(applied.len() == expected.len()
+        && expected.iter().all(|migration| {
+            applied.iter().any(|(version, checksum)| {
+                *version == migration.version && checksum.as_slice() == migration.checksum.as_ref()
+            })
+        }))
 }
 
 async fn migrate_plaintext_canaries(db: &SqlitePool, secrets: &SecretBox) -> anyhow::Result<()> {
@@ -450,7 +492,7 @@ mod integration_tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        migrate_database(&db).await.unwrap();
         AppState {
             db,
             secrets: SecretBox::from_data_dir(dir).unwrap(),
@@ -458,6 +500,19 @@ mod integration_tests {
             allow_private_endpoints: true,
         }
     }
+
+    #[tokio::test]
+    async fn current_schema_validation_does_not_require_a_database_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path()).await;
+        sqlx::query("PRAGMA query_only = ON")
+            .execute(&state.db)
+            .await
+            .unwrap();
+
+        migrate_database(&state.db).await.unwrap();
+    }
+
     fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
         Request::builder()
             .method(method)
