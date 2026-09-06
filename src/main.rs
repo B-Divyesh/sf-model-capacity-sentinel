@@ -145,18 +145,23 @@ async fn open_database(data_dir: &Path) -> anyhow::Result<(SqlitePool, &'static 
 }
 
 async fn connect_database(path: &Path) -> anyhow::Result<SqlitePool> {
-    let db_url = format!("sqlite://{}", path.display());
+    // Azure Files does not reliably release SQLite's default POSIX byte-range
+    // locks across container restarts. The built-in dot-file VFS coordinates
+    // through an atomic directory on the mounted filesystem instead. Keep one
+    // connection because dot-file locking deliberately serializes all access;
+    // this matches the product's required one-replica SQLite topology.
+    let db_url = format!("sqlite://{}?vfs=unix-dotfile", path.display());
     let options = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)
-        // A previous one-replica revision can retain a normal SQLite lock
+        // A previous one-replica process can retain the filesystem lock
         // briefly while the durable Azure Files mount is handed over. Wait
-        // for that hand-off instead of failing startup. Do not issue a
+        // for that hand-off instead of failing immediately. Do not issue a
         // `PRAGMA journal_mode` here: switching journal modes requires an
         // exclusive lock that SQLite cannot wait for with busy_timeout.
         .busy_timeout(Duration::from_secs(30))
         .foreign_keys(true);
     Ok(SqlitePoolOptions::new()
-        .max_connections(5)
+        .max_connections(1)
         .connect_with(options)
         .await?)
 }
@@ -529,6 +534,11 @@ mod integration_tests {
         Json,
     };
     use serde_json::{json, Value};
+    use std::{
+        process::{Command, Stdio},
+        thread,
+        time::Instant,
+    };
     use tower::ServiceExt;
 
     async fn test_state(dir: &std::path::Path) -> AppState {
@@ -561,6 +571,89 @@ mod integration_tests {
             .unwrap();
 
         migrate_database(&state.db).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema_initializes_when_default_sqlite_locking_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("remote-mount.db");
+        let ready = temp.path().join("lock-ready");
+        let mut lock_holder = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "integration_tests::conventional_sqlite_lock_helper",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("SENTINEL_LOCK_TEST_DB", &database)
+            .env("SENTINEL_LOCK_TEST_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready.is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        assert!(
+            ready.is_file(),
+            "helper did not acquire the conventional lock"
+        );
+
+        let default_options =
+            SqliteConnectOptions::from_str(&format!("sqlite://{}", database.display()))
+                .unwrap()
+                .create_if_missing(true)
+                .busy_timeout(Duration::from_millis(100));
+        let default_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(default_options)
+            .await
+            .unwrap();
+        let blocked = sqlx::query("CREATE TABLE blocked_by_remote_lock(id INTEGER)")
+            .execute(&default_pool)
+            .await;
+        let lock_error = blocked.expect_err(
+            "the fixture must reproduce the conventional SQLite lock failure",
+        );
+        assert!(lock_error.to_string().contains("database is locked"));
+        default_pool.close().await;
+
+        let compatible_pool = connect_database(&database).await.unwrap();
+        migrate_database(&compatible_pool).await.unwrap();
+        let applied: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = TRUE")
+                .fetch_one(&compatible_pool)
+                .await
+                .unwrap();
+        assert_eq!(applied, MIGRATOR.iter().count() as i64);
+        compatible_pool.close().await;
+        assert!(!PathBuf::from(format!("{}.lock", database.display())).exists());
+
+        lock_holder.kill().ok();
+        lock_holder.wait().unwrap();
+    }
+
+    #[tokio::test]
+    async fn conventional_sqlite_lock_helper() {
+        let (Ok(database), Ok(ready)) = (
+            std::env::var("SENTINEL_LOCK_TEST_DB"),
+            std::env::var("SENTINEL_LOCK_TEST_READY"),
+        ) else {
+            return;
+        };
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{database}"))
+            .unwrap()
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("BEGIN EXCLUSIVE").execute(&pool).await.unwrap();
+        std::fs::write(ready, b"ready").unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
     }
 
     fn json_request(method: &str, uri: &str, body: Value) -> Request<Body> {
